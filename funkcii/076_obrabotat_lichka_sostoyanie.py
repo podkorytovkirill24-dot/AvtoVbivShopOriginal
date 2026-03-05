@@ -1,0 +1,635 @@
+async def handle_private_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = get_state(context)
+    if not state:
+        return
+    name = state["name"]
+    text = (update.message.text or update.message.caption or "").strip()
+    conn = get_conn()
+
+    if name == "submit_numbers":
+        numbers = filter_kz_numbers(extract_numbers(text))
+        if not numbers:
+            conn.close()
+            await update.message.reply_text(f"Не вижу KZ номера.\n\n{SUBMIT_RULES_TEXT}")
+            return
+        tariff_id = state["data"].get("tariff_id")
+        dept_id = state["data"].get("department_id")
+        reception_chat_id = state["data"].get("reception_chat_id")
+        if not reception_chat_id:
+            conn.close()
+            clear_state(context)
+            await update.message.reply_text("Приемка не выбрана. Откройте меню и выберите тариф заново.")
+            return
+        allow_repeat = get_config_bool(conn, "allow_repeat", True)
+        limit_per_day = get_config_int(conn, "limit_per_day", 0)
+        require_sub = get_config_bool(conn, "require_subscription", False)
+        if get_config_bool(conn, "stop_work"):
+            conn.close()
+            await update.message.reply_text("Приемка на паузе. Попробуйте позже.")
+            clear_state(context)
+            return
+        if require_sub:
+            sub_until = conn.execute(
+                "SELECT subscription_until FROM users WHERE user_id = ?",
+                (update.effective_user.id,),
+            ).fetchone()["subscription_until"]
+            if not sub_until or sub_until < now_ts():
+                conn.close()
+                await update.message.reply_text("Подписка не активна. Обратитесь к администратору.")
+                clear_state(context)
+                return
+        if limit_per_day > 0:
+            start_day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+            cnt = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM queue_numbers "
+                "WHERE user_id = ? AND created_at >= ?",
+                (update.effective_user.id, int(start_day)),
+            ).fetchone()["cnt"]
+            if cnt + len(numbers) > limit_per_day:
+                conn.close()
+                await update.message.reply_text(f"Лимит сдачи на сегодня: {limit_per_day}.")
+                clear_state(context)
+                return
+
+        photo_id = None
+        if update.message.photo:
+            photo_id = update.message.photo[-1].file_id
+
+        pending_before = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM queue_numbers WHERE status = 'queued' AND reception_chat_id = ?",
+            (reception_chat_id,),
+        ).fetchone()["cnt"]
+        created_at = now_ts()
+        accepted = []
+        for idx, phone in enumerate(numbers, start=1):
+            if not allow_repeat:
+                exists = conn.execute(
+                    "SELECT id FROM queue_numbers WHERE phone = ? "
+                    "AND status IN ('queued','taken','success')",
+                    (phone,),
+                ).fetchone()
+                if exists:
+                    continue
+            conn.execute(
+                "INSERT INTO queue_numbers "
+                "(reception_chat_id, user_id, username, phone, status, created_at, tariff_id, department_id, photo_file_id) "
+                "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?)",
+                (
+                    reception_chat_id,
+                    update.effective_user.id,
+                    update.effective_user.username,
+                    phone,
+                    created_at + idx,
+                    tariff_id,
+                    dept_id,
+                    photo_id,
+                ),
+            )
+            accepted.append(phone)
+        conn.commit()
+        conn.close()
+        clear_state(context)
+        if not accepted:
+            await update.message.reply_text("Номера не приняты (повторные запрещены).")
+            return
+        await update.message.reply_text(build_accept_text(accepted, pending_before))
+        return
+
+    if name == "admin_tariff_add":
+        title, price, duration = parse_tariff_text(text)
+        if not title:
+            conn.close()
+            await update.message.reply_text("Формат: Название | цена | минуты")
+            return
+        conn.execute(
+            "INSERT INTO tariffs (name, price, duration_min, priority) VALUES (?, ?, ?, 0)",
+            (title, price, duration),
+        )
+        conn.commit()
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Тариф добавлен.")
+        return
+
+    if name == "admin_tariff_edit":
+        tariff_id = state["data"].get("tariff_id")
+        title, price, duration = parse_tariff_text(text)
+        if not title:
+            conn.close()
+            await update.message.reply_text("Формат: Название | цена | минуты")
+            return
+        conn.execute(
+            "UPDATE tariffs SET name = ?, price = ?, duration_min = ? WHERE id = ?",
+            (title, price, duration, tariff_id),
+        )
+        conn.commit()
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Тариф обновлен.")
+        return
+
+    if name == "admin_tariff_delete":
+        try:
+            tariff_id = int(text)
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Введите ID тарифа.")
+            return
+        conn.execute("DELETE FROM tariffs WHERE id = ?", (tariff_id,))
+        conn.commit()
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Тариф удален.")
+        return
+
+    if name == "admin_department_add":
+        if not text:
+            conn.close()
+            await update.message.reply_text("Введите название приемки.")
+            return
+        conn.execute("INSERT INTO departments (name) VALUES (?)", (text,))
+        conn.commit()
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Приемка добавлена.")
+        return
+
+    if name == "admin_department_edit":
+        dept_id = state["data"].get("department_id")
+        if not text:
+            conn.close()
+            await update.message.reply_text("Введите новое название.")
+            return
+        conn.execute("UPDATE departments SET name = ? WHERE id = ?", (text, dept_id))
+        conn.commit()
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Приемка обновлена.")
+        return
+
+    if name == "admin_department_delete":
+        try:
+            dept_id = int(text)
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Введите ID приемки.")
+            return
+        conn.execute("DELETE FROM departments WHERE id = ?", (dept_id,))
+        conn.commit()
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Приемка удалена.")
+        return
+
+    if name == "admin_office_add":
+        if not text:
+            conn.close()
+            await update.message.reply_text("Введите название офиса.")
+            return
+        conn.execute("INSERT INTO offices (name) VALUES (?)", (text,))
+        conn.commit()
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Офис добавлен.")
+        return
+
+    if name == "admin_office_edit":
+        office_id = state["data"].get("office_id")
+        if not text:
+            conn.close()
+            await update.message.reply_text("Введите новое название.")
+            return
+        conn.execute("UPDATE offices SET name = ? WHERE id = ?", (text, office_id))
+        conn.commit()
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Офис обновлен.")
+        return
+
+    if name == "admin_office_delete":
+        try:
+            office_id = int(text)
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Введите ID офиса.")
+            return
+        conn.execute("DELETE FROM offices WHERE id = ?", (office_id,))
+        conn.commit()
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Офис удален.")
+        return
+
+    if name == "admin_set_priority":
+        tariff_id = state["data"].get("tariff_id")
+        try:
+            priority = int(text)
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Введите число.")
+            return
+        conn.execute("UPDATE tariffs SET priority = ? WHERE id = ?", (priority, tariff_id))
+        conn.commit()
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Приоритет обновлен.")
+        return
+
+    if name == "admin_limit":
+        try:
+            limit = int(text)
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Введите число.")
+            return
+        set_config(conn, "limit_per_day", str(limit))
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Лимит обновлен.")
+        return
+
+    if name == "admin_actuality":
+        try:
+            minutes = int(text)
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Введите число минут.")
+            return
+        set_config(conn, "actualization_minutes", str(minutes))
+        set_config(conn, "actualization_on", "1" if minutes > 0 else "0")
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Актуальность обновлена.")
+        return
+
+    if name == "admin_auto_success":
+        try:
+            minutes = int(text)
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Введите число минут.")
+            return
+        set_config(conn, "auto_success_minutes", str(minutes))
+        set_config(conn, "auto_success_on", "1" if minutes > 0 else "0")
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Авто-встал обновлен.")
+        return
+
+    if name == "admin_auto_slip":
+        try:
+            minutes = int(text)
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Введите число минут.")
+            return
+        set_config(conn, "auto_slip_minutes", str(minutes))
+        set_config(conn, "auto_slip_on", "1" if minutes > 0 else "0")
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Авто-слёт обновлен.")
+        return
+
+    if name == "admin_lunch":
+        parts = [p.strip() for p in text.split("-", 1)]
+        if len(parts) != 2:
+            conn.close()
+            await update.message.reply_text("Формат: HH:MM-HH:MM")
+            return
+        set_config(conn, "lunch_start", parts[0])
+        set_config(conn, "lunch_end", parts[1])
+        set_config(conn, "lunch_on", "1")
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Расписание обедов обновлено.")
+        return
+
+    if name == "admin_add_admin":
+        admin_id = resolve_user_id_input(conn, text)
+        if admin_id is None:
+            conn.close()
+            await update.message.reply_text("Введите ЮЗ (@username) или ID пользователя.")
+            return
+        conn.execute("INSERT INTO admins (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING", (admin_id,))
+        conn.commit()
+        conn.close()
+        log_admin_action(update.effective_user.id, update.effective_user.username, "add_admin", f"target_id={admin_id}")
+        clear_state(context)
+        await update.message.reply_text("Админ добавлен.")
+        return
+
+    if name == "admin_remove_admin":
+        admin_id = resolve_user_id_input(conn, text)
+        if admin_id is None:
+            conn.close()
+            await update.message.reply_text("Введите ЮЗ (@username) или ID пользователя.")
+            return
+        conn.execute("DELETE FROM admins WHERE user_id = ?", (admin_id,))
+        conn.commit()
+        conn.close()
+        log_admin_action(update.effective_user.id, update.effective_user.username, "remove_admin", f"target_id={admin_id}")
+        clear_state(context)
+        await update.message.reply_text("Админ удален.")
+        return
+
+    if name == "admin_search_number":
+        phone = "".join(extract_numbers(text))
+        if not phone:
+            conn.close()
+            await update.message.reply_text("Введите номер.")
+            return
+        rows = conn.execute(
+            "SELECT q.phone, q.status, q.created_at, q.completed_at, t.name AS tariff "
+            "FROM queue_numbers q LEFT JOIN tariffs t ON q.tariff_id = t.id "
+            "WHERE q.phone LIKE ? ORDER BY q.created_at DESC LIMIT 20",
+            (f"%{phone}%",),
+        ).fetchall()
+        conn.close()
+        clear_state(context)
+        if not rows:
+            await update.message.reply_text("Ничего не найдено.")
+            return
+        lines = ["🔍 Результаты поиска:"]
+        for r in rows:
+            lines.append(
+                f"{r['phone']} | {status_human(r['status'])} | {r['tariff']} | {format_ts(r['created_at'])}"
+            )
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    if name == "admin_broadcast":
+        if not text and not update.message.photo:
+            conn.close()
+            await update.message.reply_text("Отправьте текст или фото.")
+            return
+        photo_id = update.message.photo[-1].file_id if update.message.photo else None
+        users = conn.execute("SELECT user_id FROM users WHERE is_blocked = 0").fetchall()
+        conn.close()
+        sent = 0
+        for u in users:
+            try:
+                if photo_id:
+                    await context.bot.send_photo(chat_id=u["user_id"], photo=photo_id, caption=text or "")
+                else:
+                    await context.bot.send_message(chat_id=u["user_id"], text=text)
+                sent += 1
+            except Exception:
+                continue
+        clear_state(context)
+        await update.message.reply_text(f"Рассылка завершена. Отправлено: {sent}.")
+        return
+
+    if name == "support_message":
+        ticket_id = state["data"].get("ticket_id")
+        conn.execute(
+            "INSERT INTO support_messages (ticket_id, sender_id, text, created_at) VALUES (?, ?, ?, ?)",
+            (ticket_id, update.effective_user.id, text, now_ts()),
+        )
+        conn.commit()
+        admins = conn.execute("SELECT user_id FROM admins").fetchall()
+        conn.close()
+        for admin in admins:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin["user_id"],
+                    text=(
+                        f"🆘 Новое сообщение в поддержке #{ticket_id} "
+                        f"от {format_user_label(update.effective_user.id, update.effective_user.username)}:\n{text}"
+                    ),
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("Ответить", callback_data=f"adm:support_reply:{ticket_id}")]]
+                    ),
+                )
+            except Exception:
+                continue
+        clear_state(context)
+        await update.message.reply_text("Сообщение отправлено в поддержку.")
+        return
+
+    if name == "admin_support_reply":
+        ticket_id = state["data"].get("ticket_id")
+        ticket = conn.execute(
+            "SELECT user_id FROM support_tickets WHERE id = ?",
+            (ticket_id,),
+        ).fetchone()
+        if not ticket:
+            conn.close()
+            clear_state(context)
+            await update.message.reply_text("Тикет не найден.")
+            return
+        conn.execute(
+            "INSERT INTO support_messages (ticket_id, sender_id, text, created_at) VALUES (?, ?, ?, ?)",
+            (ticket_id, update.effective_user.id, text, now_ts()),
+        )
+        conn.commit()
+        conn.close()
+        try:
+            await context.bot.send_message(
+                chat_id=ticket["user_id"],
+                text=f"Ответ поддержки #{ticket_id}:\n{text}",
+            )
+        except Exception:
+            pass
+        clear_state(context)
+        await update.message.reply_text("Ответ отправлен.")
+        return
+
+    if name == "user_withdraw":
+        try:
+            amount = float(text.replace(",", "."))
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Введите сумму.")
+            return
+        balance = calculate_user_balance(conn, update.effective_user.id)
+        if amount <= 0 or amount > balance:
+            conn.close()
+            await update.message.reply_text(f"Недостаточно средств. Доступно: ${balance:.2f}")
+            return
+        conn.execute(
+            "INSERT INTO withdrawal_requests (user_id, amount, status, created_at) "
+            "VALUES (?, ?, 'pending', ?)",
+            (update.effective_user.id, amount, now_ts()),
+        )
+        req_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        conn.commit()
+        admins = conn.execute("SELECT user_id FROM admins").fetchall()
+        conn.close()
+        for admin in admins:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin["user_id"],
+                    text=(
+                        "💰 Новый запрос вывода:\n"
+                        f"{format_user_label(update.effective_user.id, update.effective_user.username)}\n"
+                        f"Сумма: ${amount:.2f}"
+                    ),
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [InlineKeyboardButton(f"✅ Оплачено #{req_id}", callback_data=f"adm:withdraw:pay:{req_id}")],
+                            [InlineKeyboardButton(f"❌ Ошибка #{req_id}", callback_data=f"adm:withdraw:error:{req_id}")],
+                        ]
+                    ),
+                )
+            except Exception:
+                continue
+        clear_state(context)
+        await update.message.reply_text("Запрос на вывод отправлен.")
+        return
+
+    if name == "admin_payout":
+        parts = [p.strip() for p in text.split("|")]
+        if len(parts) < 2:
+            conn.close()
+            await update.message.reply_text("Формат: юз(@username)/id | сумма | примечание(необязательно)")
+            return
+        user_id = resolve_user_id_input(conn, parts[0])
+        if user_id is None:
+            conn.close()
+            await update.message.reply_text("Первое поле: укажите ЮЗ (@username) или ID.")
+            return
+        try:
+            amount = float(parts[1].replace(",", "."))
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Неверный формат.")
+            return
+        note = parts[2] if len(parts) > 2 else ""
+        conn.execute(
+            "INSERT INTO payouts (user_id, amount, note, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, amount, note, now_ts()),
+        )
+        conn.commit()
+        conn.close()
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"💸 Вам начислили ВП: ${amount:.2f}",
+            )
+        except Exception:
+            pass
+        clear_state(context)
+        await update.message.reply_text("Выплата добавлена.")
+        return
+
+    if name == "admin_user_subscription":
+        parts = [p.strip() for p in text.split("|")]
+        if len(parts) < 2:
+            conn.close()
+            await update.message.reply_text("Формат: юз(@username)/id | дней")
+            return
+        user_id = resolve_user_id_input(conn, parts[0])
+        if user_id is None:
+            conn.close()
+            await update.message.reply_text("Первое поле: укажите ЮЗ (@username) или ID.")
+            return
+        try:
+            days = int(parts[1])
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Неверный формат.")
+            return
+        until = now_ts() + days * 86400
+        conn.execute(
+            "UPDATE users SET subscription_until = ? WHERE user_id = ?",
+            (until, user_id),
+        )
+        conn.commit()
+        conn.close()
+        log_admin_action(
+            update.effective_user.id,
+            update.effective_user.username,
+            "grant_subscription",
+            f"target_id={user_id}|days={days}|until={format_ts(until)}",
+        )
+        clear_state(context)
+        await update.message.reply_text("Подписка обновлена.")
+        return
+
+    if name == "mainmenu_text":
+        set_config(conn, "main_menu_text", text)
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Текст главного меню обновлен.")
+        return
+
+    if name == "mainmenu_photo":
+        if not update.message.photo:
+            conn.close()
+            await update.message.reply_text("Отправьте фото.")
+            return
+        photo_id = update.message.photo[-1].file_id
+        set_config(conn, "main_menu_photo_id", photo_id)
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Фото главного меню обновлено.")
+        return
+
+    if name == "mainmenu_btn":
+        key = state["data"].get("key")
+        if key:
+            set_config(conn, key, text)
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text("Кнопка обновлена.")
+        return
+
+    if name == "admin_report_date":
+        try:
+            dt = datetime.strptime(text, "%d.%m.%Y")
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Неверный формат. Пример: 04.02.2026")
+            return
+        start_ts = int(dt.timestamp())
+        end_ts = int((dt + timedelta(days=1)).timestamp())
+        rows = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM queue_numbers WHERE created_at BETWEEN ? AND ?",
+            (start_ts, end_ts),
+        ).fetchone()
+        success = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM queue_numbers WHERE status='success' AND completed_at BETWEEN ? AND ?",
+            (start_ts, end_ts),
+        ).fetchone()
+        slip = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM queue_numbers WHERE status='slip' AND completed_at BETWEEN ? AND ?",
+            (start_ts, end_ts),
+        ).fetchone()
+        error = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM queue_numbers WHERE status='error' AND completed_at BETWEEN ? AND ?",
+            (start_ts, end_ts),
+        ).fetchone()
+        conn.close()
+        clear_state(context)
+        await update.message.reply_text(
+            f"Отчет за {text}\n"
+            f"Сдано: {rows['cnt']}\n"
+            f"Встал: {success['cnt']} | Слет: {slip['cnt']} | Ошибки: {error['cnt']}"
+        )
+        return
+
+    if name == "admin_user_search":
+        user_id = resolve_user_id_input(conn, text)
+        if user_id is None:
+            conn.close()
+            await update.message.reply_text("Введите корректный ЮЗ (@username) или ID.")
+            return
+        user = conn.execute(
+            "SELECT user_id, username, last_seen, subscription_until, is_approved FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        conn.close()
+        clear_state(context)
+        if not user:
+            await update.message.reply_text("Пользователь не найден.")
+            return
+        sub_text = format_ts(user["subscription_until"]) if user["subscription_until"] else "-"
+        await update.message.reply_text(
+            f"{format_user_label(user['user_id'], user['username'])}\n"
+            f"Активность: {format_ts(user['last_seen'])}\n"
+            f"Подписка: {sub_text}\n"
+            f"Одобрен: {'да' if user['is_approved'] else 'нет'}"
+        )
+        return
+
+    conn.close()
