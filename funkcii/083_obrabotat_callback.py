@@ -1254,6 +1254,45 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     )
         except Exception:
             pass
+        try:
+            if query.message and status in ("success", "slip", "error"):
+                chat_id = query.message.chat_id
+                thread_id = query.message.message_thread_id or 0
+                conn = get_conn()
+                topic = conn.execute(
+                    "SELECT 1 FROM processing_topics WHERE chat_id = ? AND thread_id = ?",
+                    (chat_id, thread_id),
+                ).fetchone()
+                office = None
+                if not topic:
+                    office = conn.execute(
+                        "SELECT id FROM offices WHERE chat_id = ? AND (thread_id IS NULL OR thread_id = ?) "
+                        "ORDER BY id LIMIT 1",
+                        (chat_id, thread_id if thread_id > 0 else None),
+                    ).fetchone()
+                    if not office and thread_id > 0:
+                        office = conn.execute(
+                            "SELECT id FROM offices WHERE chat_id = ? AND thread_id IS NULL "
+                            "ORDER BY id LIMIT 1",
+                            (chat_id,),
+                        ).fetchone()
+                conn.close()
+                callback = None
+                if topic:
+                    callback = "topic:next"
+                elif office:
+                    callback = f"office:next:{office['id']}"
+                if callback:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        message_thread_id=thread_id if thread_id > 0 else None,
+                        text="📥 Рабочая панель\nНажмите кнопку ниже, чтобы получить номер из очереди.",
+                        reply_markup=InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("📩 Получить номер", callback_data=callback)]]
+                        ),
+                    )
+        except Exception:
+            pass
         await query.answer("Статус обновлен")
         return
 
