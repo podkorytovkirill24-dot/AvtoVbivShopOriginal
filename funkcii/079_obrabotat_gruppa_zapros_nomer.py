@@ -4,7 +4,7 @@ async def handle_group_request_number(update: Update, context: ContextTypes.DEFA
     if not update.message:
         return
     text = (update.message.text or "").strip().lower()
-    if "номер" not in text:
+    if "номер" not in text and "nomer" not in text:
         return
     if extract_numbers(text):
         return

@@ -1147,10 +1147,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data.startswith("q:msg:"):
         queue_id = int(parts[2])
-        set_state(context, "worker_message_user", queue_id=queue_id, chat_id=query.message.chat_id if query.message else None)
+        chat_id = query.message.chat_id if query.message else None
+        if chat_id:
+            try:
+                prompt = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="Ответьте на это сообщение, чтобы отправить владельцу (текст или фото):",
+                    reply_markup=ForceReply(selective=True),
+                )
+                set_state(
+                    context,
+                    "worker_message_user",
+                    queue_id=queue_id,
+                    chat_id=chat_id,
+                    prompt_msg_id=prompt.message_id,
+                )
+            except Exception:
+                set_state(context, "worker_message_user", queue_id=queue_id, chat_id=chat_id)
+        else:
+            set_state(context, "worker_message_user", queue_id=queue_id, chat_id=None)
         await query.answer("Введите сообщение")
-        if query.message:
-            await query.message.reply_text("Введите сообщение владельцу (текст или фото):")
         return
 
     if data.startswith("q:skip:"):

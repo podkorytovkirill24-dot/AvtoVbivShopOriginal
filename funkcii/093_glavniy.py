@@ -8,6 +8,8 @@ def main() -> None:
     application.add_handler(CommandHandler("app", cmd_app))
     application.add_handler(CommandHandler("set", cmd_set))
     application.add_handler(CommandHandler("num", cmd_num))
+    application.add_handler(CommandHandler("номер", handle_group_request_number))
+    application.add_handler(CommandHandler("nomer", handle_group_request_number))
 
     application.add_handler(CallbackQueryHandler(handle_callback))
 
