@@ -8,24 +8,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data.startswith("menu:"):
         action = parts[1]
         if action == "submit":
-            await menu_show_tariffs(context, query.from_user.id)
+            await menu_show_tariffs(context, query.from_user.id, message=query.message)
             await query.answer()
             return
         if action == "queue":
-            await menu_show_queue(context, query.from_user.id, query.from_user.id)
+            await menu_show_queue(context, query.from_user.id, query.from_user.id, message=query.message)
             await query.answer()
             return
         if action == "archive":
-            await menu_show_archive(context, query.from_user.id, query.from_user.id)
+            await menu_show_archive(context, query.from_user.id, query.from_user.id, message=query.message)
             await query.answer()
             return
         if action == "profile":
-            await menu_show_profile(context, query.from_user.id, query.from_user.id)
+            await menu_show_profile(context, query.from_user.id, query.from_user.id, message=query.message)
             await query.answer()
             return
         if action == "support":
             clear_state(context)
-            await menu_start_support(context, query.from_user.id, query.from_user.id)
+            await menu_start_support(context, query.from_user.id, query.from_user.id, message=query.message)
             await query.answer()
             return
         if action == "admin":
@@ -35,7 +35,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await query.answer(ui("no_access"), show_alert=True)
                 return
             conn.close()
-            await query.message.reply_text(ui("admin_panel_title"), reply_markup=build_admin_panel())
+            await send_or_update(
+                context,
+                query.from_user.id,
+                ui("admin_panel_title"),
+                reply_markup=build_admin_panel(),
+                message=query.message,
+            )
             await query.answer()
             return
         await query.answer()
@@ -170,6 +176,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == "adm:tariffs":
+        clear_state(context)
         conn = get_conn()
         if not is_admin(conn, query.from_user.id):
             conn.close()
@@ -188,8 +195,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.answer(ui("no_access"), show_alert=True)
             return
         conn.close()
-        set_state(context, "admin_tariff_add")
-        await query.edit_message_text("Введите: Название | цена | минуты")
+        set_state(context, "admin_tariff_add_name")
+        await query.edit_message_text(
+            "Введите название тарифа:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Назад", callback_data="adm:tariffs")]]),
+        )
         await query.answer()
         return
 
@@ -351,10 +361,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await context.bot.send_message(
                 chat_id=chat_id,
                 message_thread_id=thread_id if thread_id > 0 else None,
-                text="📥 Рабочая панель\nНажмите кнопку ниже, чтобы получить номер из очереди.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("📩 Получить номер", callback_data=f"office:next:{office_id}")]]
-                ),
+                text="📥 Рабочая панель\n"
+                "Чтобы получить номер, напишите в чат слово «номер».\n\n"
+                f"{WORKER_RULES_TEXT}",
             )
         except Exception:
             pass
@@ -383,10 +392,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await context.bot.send_message(
                 chat_id=chat_id,
                 message_thread_id=thread_id if thread_id > 0 else None,
-                text="📦 Рабочая панель\nНажмите кнопку ниже, чтобы получить номер из очереди.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("📩 Получить номер", callback_data="topic:next")]]
-                ),
+                text="📦 Рабочая панель\n"
+                "Чтобы получить номер, напишите в чат слово «номер».\n\n"
+                f"{WORKER_RULES_TEXT}",
             )
         except Exception:
             pass
@@ -1104,13 +1112,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data == "user:withdraw":
         set_state(context, "user_withdraw")
-        await query.edit_message_text("Введите сумму для вывода:")
+        await query.edit_message_text(
+            "Введите сумму для вывода:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Назад", callback_data="user:home")]]),
+        )
         await query.answer()
         return
 
     if data == "user:home":
-        await query.answer("Главное меню отправлено")
-        await send_main_menu_chat(context, query.from_user.id, query.from_user.id)
+        clear_state(context)
+        await query.answer("Главное меню")
+        await send_main_menu_chat(context, query.from_user.id, query.from_user.id, message=query.message)
         return
 
     if data.startswith("issue:"):
@@ -1251,45 +1263,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     await query.message.edit_text(
                         text=merge_status_text(txt, status_line, keep_success=keep_success),
                         reply_markup=keyboard,
-                    )
-        except Exception:
-            pass
-        try:
-            if query.message and status in ("success", "slip", "error"):
-                chat_id = query.message.chat_id
-                thread_id = query.message.message_thread_id or 0
-                conn = get_conn()
-                topic = conn.execute(
-                    "SELECT 1 FROM processing_topics WHERE chat_id = ? AND thread_id = ?",
-                    (chat_id, thread_id),
-                ).fetchone()
-                office = None
-                if not topic:
-                    office = conn.execute(
-                        "SELECT id FROM offices WHERE chat_id = ? AND (thread_id IS NULL OR thread_id = ?) "
-                        "ORDER BY id LIMIT 1",
-                        (chat_id, thread_id if thread_id > 0 else None),
-                    ).fetchone()
-                    if not office and thread_id > 0:
-                        office = conn.execute(
-                            "SELECT id FROM offices WHERE chat_id = ? AND thread_id IS NULL "
-                            "ORDER BY id LIMIT 1",
-                            (chat_id,),
-                        ).fetchone()
-                conn.close()
-                callback = None
-                if topic:
-                    callback = "topic:next"
-                elif office:
-                    callback = f"office:next:{office['id']}"
-                if callback:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        message_thread_id=thread_id if thread_id > 0 else None,
-                        text="📥 Рабочая панель\nНажмите кнопку ниже, чтобы получить номер из очереди.",
-                        reply_markup=InlineKeyboardMarkup(
-                            [[InlineKeyboardButton("📩 Получить номер", callback_data=callback)]]
-                        ),
                     )
         except Exception:
             pass

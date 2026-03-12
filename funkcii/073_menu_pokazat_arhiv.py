@@ -1,4 +1,4 @@
-async def menu_show_archive(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> None:
+async def menu_show_archive(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, message=None) -> None:
     conn = get_conn()
     rows = conn.execute(
         "SELECT phone, status, created_at, completed_at FROM queue_numbers "
@@ -12,10 +12,10 @@ async def menu_show_archive(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
         keyboard = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("📞 Сдать номер", callback_data="menu:submit")],
-                [InlineKeyboardButton("🏠 Главное меню", callback_data="user:home")],
+                [InlineKeyboardButton("⬅ Назад", callback_data="user:home")],
             ]
         )
-        await context.bot.send_message(chat_id=chat_id, text=ui("empty_archive"), reply_markup=keyboard)
+        await send_or_update(context, chat_id, ui("empty_archive"), reply_markup=keyboard, message=message)
         return
     lines = ["🗂 Архив (последние 30):"]
     for r in rows:
@@ -27,4 +27,5 @@ async def menu_show_archive(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
             )
         else:
             lines.append(f"{r['phone']} | {status_text}")
-    await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Назад", callback_data="user:home")]])
+    await send_or_update(context, chat_id, "\n".join(lines), reply_markup=keyboard, message=message)

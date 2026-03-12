@@ -95,11 +95,47 @@ async def handle_private_state(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(build_accept_text(accepted, pending_before))
         return
 
-    if name == "admin_tariff_add":
-        title, price, duration = parse_tariff_text(text)
+    if name == "admin_tariff_add_name":
+        if not text:
+            conn.close()
+            await update.message.reply_text("Введите название тарифа.")
+            return
+        set_state(context, "admin_tariff_add_price", title=text)
+        conn.close()
+        await update.message.reply_text("Введите цену (например 8 или 8.5):")
+        return
+
+    if name == "admin_tariff_add_price":
+        title = state["data"].get("title")
         if not title:
             conn.close()
-            await update.message.reply_text("Формат: Название | цена | минуты")
+            clear_state(context)
+            await update.message.reply_text("Название не найдено. Начните добавление тарифа заново.")
+            return
+        try:
+            price = float(text.replace(",", "."))
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Введите цену числом (например 8 или 8.5).")
+            return
+        set_state(context, "admin_tariff_add_duration", title=title, price=price)
+        conn.close()
+        await update.message.reply_text("Введите длительность в минутах:")
+        return
+
+    if name == "admin_tariff_add_duration":
+        title = state["data"].get("title")
+        price = float(state["data"].get("price") or 0)
+        if not title:
+            conn.close()
+            clear_state(context)
+            await update.message.reply_text("Данные тарифа потеряны. Начните добавление тарифа заново.")
+            return
+        try:
+            duration = int(text)
+        except ValueError:
+            conn.close()
+            await update.message.reply_text("Введите длительность числом (в минутах).")
             return
         conn.execute(
             "INSERT INTO tariffs (name, price, duration_min, priority) VALUES (?, ?, ?, 0)",

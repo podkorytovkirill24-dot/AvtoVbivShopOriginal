@@ -1,4 +1,4 @@
-async def menu_show_profile(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> None:
+async def menu_show_profile(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, message=None) -> None:
     conn = get_conn()
     balance = calculate_user_balance(conn, user_id)
     stats = conn.execute(
@@ -43,6 +43,6 @@ async def menu_show_profile(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
     rows = [[InlineKeyboardButton("💵 Запросить вывод", callback_data="user:withdraw")]]
     if MINI_APP_BASE_URL:
         rows.append([InlineKeyboardButton("✨ Мини-приложение", web_app=WebAppInfo(url=f"{MINI_APP_BASE_URL}/miniapp"))])
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="user:home")])
+    rows.append([InlineKeyboardButton("⬅ Назад", callback_data="user:home")])
     keyboard = InlineKeyboardMarkup(rows)
-    await context.bot.send_message(chat_id=chat_id, text=text_profile, reply_markup=keyboard)
+    await send_or_update(context, chat_id, text_profile, reply_markup=keyboard, message=message)

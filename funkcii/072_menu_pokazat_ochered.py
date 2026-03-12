@@ -1,4 +1,4 @@
-async def menu_show_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> None:
+async def menu_show_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, message=None) -> None:
     conn = get_conn()
     rows = conn.execute(
         "SELECT id, user_id, phone FROM queue_numbers "
@@ -16,7 +16,13 @@ async def menu_show_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user
             f"👥 Всего в очереди: {total}\n"
             "Вы сейчас не в очереди."
         )
-        await context.bot.send_message(chat_id=chat_id, text=text)
+        await send_or_update(
+            context,
+            chat_id,
+            text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Назад", callback_data="user:home")]]),
+            message=message,
+        )
         return
     lines = [
         "📊 Текущая очередь",
@@ -27,4 +33,10 @@ async def menu_show_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user
         lines.append(f"• {format_phone(phone)} — #{pos}")
     if len(user_positions) > 20:
         lines.append("…")
-    await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+    await send_or_update(
+        context,
+        chat_id,
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Назад", callback_data="user:home")]]),
+        message=message,
+    )

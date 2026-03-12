@@ -40,6 +40,7 @@ async def send_number_to_worker(update: Update, context: ContextTypes.DEFAULT_TY
     thread_id = msg_src.message_thread_id if msg_src else None
     reply_to_id = msg_src.message_id if update.message and msg_src else None
 
+    sent_ok = False
     try:
         if row["photo_file_id"]:
             msg = await context.bot.send_photo(
@@ -58,6 +59,7 @@ async def send_number_to_worker(update: Update, context: ContextTypes.DEFAULT_TY
                 reply_markup=keyboard,
                 reply_to_message_id=reply_to_id,
             )
+        sent_ok = True
         conn = get_conn()
         conn.execute(
             "UPDATE queue_numbers SET worker_chat_id = ?, worker_msg_id = ? WHERE id = ?",
@@ -67,6 +69,21 @@ async def send_number_to_worker(update: Update, context: ContextTypes.DEFAULT_TY
         conn.close()
     except Exception as exc:
         logger.warning("Failed to send to worker: %s", exc)
+
+    if not sent_ok:
+        try:
+            conn = get_conn()
+            conn.execute(
+                "UPDATE queue_numbers "
+                "SET status = 'queued', assigned_at = NULL, worker_id = NULL, worker_chat_id = NULL, worker_msg_id = NULL "
+                "WHERE id = ?",
+                (row["id"],),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+        return
 
     if notify_taken:
         try:
