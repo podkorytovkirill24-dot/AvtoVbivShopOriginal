@@ -22,16 +22,20 @@ def main() -> None:
         MessageHandler(filters.ChatType.PRIVATE & filters.PHOTO, handle_photo_qr)
     )
     application.add_handler(
-        MessageHandler(filters.ChatType.GROUPS & filters.REPLY & (filters.TEXT | filters.PHOTO), handle_worker_code_reply)
+        MessageHandler(filters.ChatType.GROUPS & filters.REPLY & (filters.TEXT | filters.PHOTO), handle_worker_code_reply),
+        group=0,
     )
     application.add_handler(
-        MessageHandler(filters.ChatType.GROUPS & (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_group_worker_state, block=False)
+        MessageHandler(filters.ChatType.GROUPS & filters.REPLY & (filters.TEXT | filters.PHOTO), handle_group_worker_state),
+        group=1,
     )
     application.add_handler(
-        MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, handle_group_request_number, block=False)
+        MessageHandler(filters.ChatType.GROUPS & filters.Regex(r"(?i)^\\s*(номер|nomer)\\s*$"), handle_group_request_number),
+        group=2,
     )
     application.add_handler(
-        MessageHandler(filters.ChatType.GROUPS & (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_group_submission)
+        MessageHandler(filters.ChatType.GROUPS & (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_group_submission),
+        group=3,
     )
 
     if application.job_queue is not None:
