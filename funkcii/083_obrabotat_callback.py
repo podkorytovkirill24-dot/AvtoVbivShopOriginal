@@ -362,8 +362,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 chat_id=chat_id,
                 message_thread_id=thread_id if thread_id > 0 else None,
                 text="📥 Рабочая панель\n"
-                "Чтобы получить номер, напишите в чат слово «номер».\n\n"
+                "Чтобы получить номер, нажмите кнопку «Взять номер».\n\n"
                 f"{WORKER_RULES_TEXT}",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("📥 Взять номер", callback_data="topic:next")]]
+                ),
             )
         except Exception:
             pass
@@ -393,8 +396,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 chat_id=chat_id,
                 message_thread_id=thread_id if thread_id > 0 else None,
                 text="📦 Рабочая панель\n"
-                "Чтобы получить номер, напишите в чат слово «номер».\n\n"
+                "Чтобы получить номер, нажмите кнопку «Взять номер».\n\n"
                 f"{WORKER_RULES_TEXT}",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("📥 Взять номер", callback_data="topic:next")]]
+                ),
             )
         except Exception:
             pass
@@ -1148,10 +1154,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data.startswith("q:msg:"):
         queue_id = int(parts[2])
         chat_id = query.message.chat_id if query.message else None
+        thread_id = query.message.message_thread_id if query.message else None
         if chat_id:
             try:
                 prompt = await context.bot.send_message(
                     chat_id=chat_id,
+                    message_thread_id=thread_id if thread_id and thread_id > 0 else None,
                     text="Ответьте на это сообщение, чтобы отправить владельцу (текст или фото):",
                     reply_markup=ForceReply(selective=True),
                 )
@@ -1160,10 +1168,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "worker_message_user",
                     queue_id=queue_id,
                     chat_id=chat_id,
+                    thread_id=thread_id or 0,
                     prompt_msg_id=prompt.message_id,
                 )
             except Exception:
-                set_state(context, "worker_message_user", queue_id=queue_id, chat_id=chat_id)
+                set_state(context, "worker_message_user", queue_id=queue_id, chat_id=chat_id, thread_id=thread_id or 0)
         else:
             set_state(context, "worker_message_user", queue_id=queue_id, chat_id=None)
         await query.answer("Введите сообщение")
@@ -1282,6 +1291,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     )
         except Exception:
             pass
+        if status in ("slip", "error") and query.message:
+            try:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    message_thread_id=query.message.message_thread_id,
+                    text="Нажмите «Взять номер», чтобы получить следующий:",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("📥 Взять номер", callback_data="topic:next")]]
+                    ),
+                )
+            except Exception:
+                pass
         await query.answer("Статус обновлен")
         return
 
