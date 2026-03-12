@@ -30,6 +30,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     WebAppInfo,
+    ForceReply,
     ReplyKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardRemove,
@@ -149,7 +150,7 @@ SUBMIT_RULES_TEXT = (
 
 WORKER_RULES_TEXT = (
     "📋 Правила для операторов:\n"
-    "1) Чтобы взять номер, напишите в чат слово «номер».\n"
+    "1) Чтобы взять номер, напишите в чат слово «номер» (или команду /номер).\n"
     "2) После обработки обязательно поставьте статус: ✅ Встал / ❌ Ошибка / ⚠ Слетел.\n"
     "3) Для связи с владельцем используйте кнопку «Сообщение владельцу» под номером."
 )
