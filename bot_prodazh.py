@@ -451,6 +451,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
         return
 
+    if text == cfg.sales_bot_token:
+        await update.effective_message.reply_text(
+            "Этот токен принадлежит боту продаж. Его нельзя привязывать как клиентского.\n"
+            "Создайте отдельного бота в @BotFather и отправьте его токен."
+        )
+        return
+
+    for other in list_licenses(cfg):
+        if not other["token_encrypted"]:
+            continue
+        if int(other["user_id"]) == user_id:
+            continue
+        try:
+            other_token = cipher.decrypt(other["token_encrypted"])
+        except Exception:
+            continue
+        if other_token == text:
+            await update.effective_message.reply_text(
+                "Этот токен уже привязан к другому пользователю. Нужен уникальный токен бота."
+            )
+            return
+
     ok, bot_info, err = await asyncio.to_thread(verify_bot_token, text)
     if not ok:
         await update.effective_message.reply_text(
@@ -474,6 +496,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text(
             "Токен сохранен, но подписка уже истекла. Оформите продление в меню.",
             reply_markup=main_menu(cfg),
+        )
+        return
+
+    await asyncio.sleep(0.4)
+    if not supervisor.is_running(user_id):
+        await update.effective_message.reply_text(
+            "Токен сохранен, но бот не запустился.\n"
+            "Проверьте логи и права на хостинге. Лог: "
+            f"{updated['instance_dir']}/bot_stderr.log"
         )
         return
 

@@ -780,6 +780,23 @@ class InstanceSupervisor:
         stdout_handle = open(out_path, "a", encoding="utf-8")
         stderr_handle = open(err_path, "a", encoding="utf-8")
 
+        if token == self.cfg.sales_bot_token:
+            try:
+                stderr_handle.write(
+                    "ERROR: token for sales bot was provided; client bot will not be started.\n"
+                )
+                stderr_handle.flush()
+            finally:
+                try:
+                    stdout_handle.close()
+                except Exception:
+                    pass
+                try:
+                    stderr_handle.close()
+                except Exception:
+                    pass
+            return
+
         env = os.environ.copy()
         env["BOT_TOKEN"] = token
         env["BOT_DB_PATH"] = str(instance_dir / "bot.db")
@@ -788,13 +805,46 @@ class InstanceSupervisor:
         env["MINI_APP_BASE_URL"] = ""
         env["BOT_USERNAME"] = (row["bot_username"] or "").strip().lstrip("@")
 
-        process = subprocess.Popen(
-            [self.cfg.python_executable, str(self.cfg.project_main_path)],
-            cwd=str(self.cfg.project_root),
-            env=env,
-            stdout=stdout_handle,
-            stderr=stderr_handle,
-        )
+        try:
+            process = subprocess.Popen(
+                [self.cfg.python_executable, str(self.cfg.project_main_path)],
+                cwd=str(self.cfg.project_root),
+                env=env,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+            )
+        except Exception as exc:
+            try:
+                stderr_handle.write(f"ERROR: failed to start bot process: {exc}\n")
+                stderr_handle.flush()
+            finally:
+                try:
+                    stdout_handle.close()
+                except Exception:
+                    pass
+                try:
+                    stderr_handle.close()
+                except Exception:
+                    pass
+            return
+
+        time.sleep(0.2)
+        if process.poll() is not None:
+            try:
+                stderr_handle.write(
+                    f"ERROR: bot process exited immediately with code {process.returncode}\n"
+                )
+                stderr_handle.flush()
+            finally:
+                try:
+                    stdout_handle.close()
+                except Exception:
+                    pass
+                try:
+                    stderr_handle.close()
+                except Exception:
+                    pass
+            return
         with self._lock:
             self._running[user_id] = RunningProcess(
                 process=process,
