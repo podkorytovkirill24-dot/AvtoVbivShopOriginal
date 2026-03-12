@@ -5,7 +5,7 @@ from pathlib import Path
 
 from datetime import datetime, timedelta
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -148,6 +148,7 @@ def admin_panel_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🎁 Акции", callback_data="admin:promos")],
         [InlineKeyboardButton("📢 Рассылка", callback_data="admin:broadcast")],
         [InlineKeyboardButton("⭐ Приоритет", callback_data="admin:priority_list")],
+        [InlineKeyboardButton("🗄 База", callback_data="admin:db")],
         [InlineKeyboardButton("🏠 В меню", callback_data="to_menu")],
     ]
     return InlineKeyboardMarkup(rows)
@@ -169,6 +170,15 @@ def admin_promos_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🗑 Удалить акцию", callback_data="admin:promo:delete")],
         [InlineKeyboardButton("🔛 Вкл/Выкл", callback_data="admin:promo:toggle")],
         [InlineKeyboardButton("📊 Статистика", callback_data="admin:promo:stats")],
+        [InlineKeyboardButton("⬅ Назад", callback_data="admin:panel")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_db_menu() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("⬇️ Скачать базу", callback_data="admin:db:download")],
+        [InlineKeyboardButton("⬆️ Загрузить базу", callback_data="admin:db:upload")],
         [InlineKeyboardButton("⬅ Назад", callback_data="admin:panel")],
     ]
     return InlineKeyboardMarkup(rows)
@@ -278,6 +288,10 @@ async def handle_admin_state_input(
 
     name = state.get("name")
     data = state.get("data", {})
+
+    if name == "admin_db_upload":
+        await update.effective_message.reply_text("Пришлите файл базы .db (документом).")
+        return True
 
     if name == "admin_delete_sub":
         user_row = resolve_user_by_username_or_id(cfg, text)
@@ -569,6 +583,55 @@ async def handle_admin_state_input(
     return False
 
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.type != "private":
+        return
+    msg = update.effective_message
+    if not msg or not msg.document:
+        return
+    cfg, _, supervisor, _ = get_runtime(context)
+    user_id = int(update.effective_user.id)
+    if not is_owner(cfg, user_id):
+        return
+    state = get_admin_state(context)
+    if not state or state.get("name") != "admin_db_upload":
+        return
+
+    doc = msg.document
+    await msg.reply_text("⏳ Загружаю базу...")
+
+    db_path = cfg.sales_db_path
+    backup_path = None
+    try:
+        supervisor.shutdown()
+        if db_path.exists():
+            backup_path = db_path.with_suffix(db_path.suffix + f".bak_{now_ts()}")
+            db_path.replace(backup_path)
+
+        file = await context.bot.get_file(doc.file_id)
+        await file.download_to_drive(custom_path=str(db_path))
+
+        init_db(cfg)
+        supervisor.start()
+        clear_admin_state(context)
+        backup_note = f"\nРезервная копия: {backup_path.name}" if backup_path else ""
+        await msg.reply_text(f"✅ База загружена.{backup_note}", reply_markup=admin_panel_menu())
+    except Exception as exc:
+        try:
+            if backup_path and backup_path.exists():
+                if db_path.exists():
+                    db_path.unlink()
+                backup_path.replace(db_path)
+        except Exception:
+            pass
+        try:
+            supervisor.start()
+        except Exception:
+            pass
+        clear_admin_state(context)
+        await msg.reply_text(f"❌ Ошибка загрузки базы: {exc}", reply_markup=admin_panel_menu())
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cfg, _, _, _ = get_runtime(context)
     upsert_user(cfg, update.effective_user)
@@ -725,6 +788,33 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "Кнопка: Текст | https://example.com\n"
             "Для отмены напишите «отмена»."
         )
+        return
+
+    if data == "admin:db":
+        if not is_owner(cfg, user_id):
+            await query.message.reply_text("Нет доступа.")
+            return
+        await query.message.reply_text("🗄 Управление базой:", reply_markup=admin_db_menu())
+        return
+
+    if data == "admin:db:download":
+        if not is_owner(cfg, user_id):
+            await query.message.reply_text("Нет доступа.")
+            return
+        db_path = cfg.sales_db_path
+        if not db_path.exists():
+            await query.message.reply_text("Файл базы не найден.")
+            return
+        filename = f"sales_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+        await query.message.reply_document(InputFile(str(db_path), filename=filename))
+        return
+
+    if data == "admin:db:upload":
+        if not is_owner(cfg, user_id):
+            await query.message.reply_text("Нет доступа.")
+            return
+        set_admin_state(context, "admin_db_upload")
+        await query.message.reply_text("Отправьте файл базы (sales.db).")
         return
 
     if data.startswith("buy:"):
@@ -1063,6 +1153,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.Document.ALL, handle_document))
 
     try:
         app.run_polling()
