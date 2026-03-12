@@ -528,11 +528,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "adm:reports":
         keyboard = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("1) Отчёт по тарифу", callback_data="adm:report:tariff")],
-                [InlineKeyboardButton("2) Отчёт общий", callback_data="adm:report:general")],
-                [InlineKeyboardButton("3) Детальные отчёты", callback_data="adm:report:detailed")],
-                [InlineKeyboardButton("4) Симуляция отчёта", callback_data="adm:report:sim")],
-                [InlineKeyboardButton("📆 Просмотр за дату", callback_data="adm:report:date")],
+                [InlineKeyboardButton("1) Детальный отчёт", callback_data="adm:report:detailed")],
+                [InlineKeyboardButton("2) Просмотр за дату", callback_data="adm:report:date")],
+                [InlineKeyboardButton("3) Номера отстоявшие", callback_data="adm:report:stood")],
+                [InlineKeyboardButton("4) Номера не отстоявшие", callback_data="adm:report:not_stood")],
                 [InlineKeyboardButton("⬅ Назад", callback_data="adm:panel")],
             ]
         )
@@ -551,6 +550,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             text = build_report_detailed(conn)
         elif report_type == "sim":
             text = build_report_general(conn)
+        elif report_type == "stood":
+            text = build_report_stood(conn)
+        elif report_type == "not_stood":
+            text = build_report_not_stood(conn)
         elif report_type == "date":
             set_state(context, "admin_report_date")
             conn.close()
