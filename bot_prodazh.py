@@ -3,6 +3,8 @@ import asyncio
 import re
 from pathlib import Path
 
+from datetime import datetime, timedelta
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -21,6 +23,7 @@ from prodazha_yadro import (
     apply_paid_plan,
     attach_token_to_license,
     create_order,
+    delete_license,
     describe_license,
     ensure_dirs,
     ensure_secret_key,
@@ -28,16 +31,26 @@ from prodazha_yadro import (
     get_admin_stats,
     get_license,
     get_order,
+    get_promotion,
+    get_promo_stats,
     init_db,
     is_priority_user,
     list_licenses,
+    list_licenses_with_users,
+    list_promotions,
+    list_user_ids,
     list_priority_users,
+    add_promotion,
     mark_order_status,
     now_ts,
     resolve_user_by_username_or_id,
     revoke_priority,
+    set_promotion_active,
+    set_license_start_date,
     sync_plan_prices,
     grant_priority,
+    update_promotion,
+    delete_promotion,
     upsert_user,
     verify_bot_token,
 )
@@ -48,6 +61,55 @@ APP_CRYPTO = "crypto_client"
 APP_SUPERVISOR = "supervisor"
 APP_CIPHER = "cipher"
 TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
+DATE_RE = re.compile(r"(\d{2}\.\d{2}\.\d{4})")
+ADMIN_STATE_KEY = "admin_state"
+PLAN_ALIASES = {
+    "week": "week",
+    "неделя": "week",
+    "7": "week",
+    "month": "month",
+    "месяц": "month",
+    "30": "month",
+    "lifetime": "lifetime",
+    "навсегда": "lifetime",
+    "forever": "lifetime",
+}
+
+
+def set_admin_state(context: ContextTypes.DEFAULT_TYPE, name: str, data: dict | None = None) -> None:
+    context.user_data[ADMIN_STATE_KEY] = {"name": name, "data": data or {}}
+
+
+def get_admin_state(context: ContextTypes.DEFAULT_TYPE) -> dict | None:
+    return context.user_data.get(ADMIN_STATE_KEY)
+
+
+def clear_admin_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(ADMIN_STATE_KEY, None)
+
+
+def parse_plan_key(text: str) -> str | None:
+    raw = (text or "").strip().lower()
+    return PLAN_ALIASES.get(raw)
+
+
+def parse_date(text: str) -> datetime | None:
+    try:
+        return datetime.strptime(text.strip(), "%d.%m.%Y")
+    except Exception:
+        return None
+
+
+def format_date(ts: int | None) -> str:
+    if not ts:
+        return "-"
+    return datetime.fromtimestamp(int(ts)).strftime("%d.%m.%Y")
+
+
+def format_datetime(ts: int | None) -> str:
+    if not ts:
+        return "-"
+    return datetime.fromtimestamp(int(ts)).strftime("%d.%m.%Y %H:%M")
 
 
 def main_menu(cfg: SalesConfig) -> InlineKeyboardMarkup:
@@ -55,35 +117,59 @@ def main_menu(cfg: SalesConfig) -> InlineKeyboardMarkup:
     month = cfg.plans["month"]
     lifetime = cfg.plans["lifetime"]
     rows = [
-        [InlineKeyboardButton(f"Купить неделю ({week.price_usdt:.2f} USDT)", callback_data="buy:week")],
-        [InlineKeyboardButton(f"Купить месяц ({month.price_usdt:.2f} USDT)", callback_data="buy:month")],
-        [InlineKeyboardButton(f"Купить навсегда ({lifetime.price_usdt:.2f} USDT)", callback_data="buy:lifetime")],
-        [InlineKeyboardButton("Моя подписка", callback_data="my_license")],
+        [InlineKeyboardButton(f"🛒 Купить неделю ({week.price_usdt:.2f} USDT)", callback_data="buy:week")],
+        [InlineKeyboardButton(f"🛒 Купить месяц ({month.price_usdt:.2f} USDT)", callback_data="buy:month")],
+        [InlineKeyboardButton(f"🏆 Купить навсегда ({lifetime.price_usdt:.2f} USDT)", callback_data="buy:lifetime")],
+        [InlineKeyboardButton("👤 Моя подписка", callback_data="my_license")],
     ]
     return InlineKeyboardMarkup(rows)
 
 
 def payment_menu(pay_url: str, order_id: int) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("Оплатить", url=pay_url)],
-        [InlineKeyboardButton("Проверить оплату", callback_data=f"check:{order_id}")],
-        [InlineKeyboardButton("В меню", callback_data="to_menu")],
+        [InlineKeyboardButton("💳 Оплатить", url=pay_url)],
+        [InlineKeyboardButton("✅ Проверить оплату", callback_data=f"check:{order_id}")],
+        [InlineKeyboardButton("🏠 В меню", callback_data="to_menu")],
     ]
     return InlineKeyboardMarkup(rows)
 
 
 def owner_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Админ-панель", callback_data="admin:panel")]]
+        [[InlineKeyboardButton("🛠 Админ-панель", callback_data="admin:panel")]]
     )
 
 
 def admin_panel_menu() -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("Статистика", callback_data="admin:stats")],
-        [InlineKeyboardButton("Список клиентов", callback_data="admin:clients")],
-        [InlineKeyboardButton("Список приоритета", callback_data="admin:priority_list")],
-        [InlineKeyboardButton("В меню", callback_data="to_menu")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="admin:stats")],
+        [InlineKeyboardButton("👥 Клиенты", callback_data="admin:clients")],
+        [InlineKeyboardButton("🧾 Подписки", callback_data="admin:subs")],
+        [InlineKeyboardButton("🎁 Акции", callback_data="admin:promos")],
+        [InlineKeyboardButton("📢 Рассылка", callback_data="admin:broadcast")],
+        [InlineKeyboardButton("⭐ Приоритет", callback_data="admin:priority_list")],
+        [InlineKeyboardButton("🏠 В меню", callback_data="to_menu")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_subs_menu() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("🗑 Удалить подписку", callback_data="admin:subs:delete")],
+        [InlineKeyboardButton("🕒 Изменить дату покупки", callback_data="admin:subs:backdate")],
+        [InlineKeyboardButton("⬅ Назад", callback_data="admin:panel")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_promos_menu() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("➕ Добавить акцию", callback_data="admin:promo:add")],
+        [InlineKeyboardButton("✏️ Изменить акцию", callback_data="admin:promo:edit")],
+        [InlineKeyboardButton("🗑 Удалить акцию", callback_data="admin:promo:delete")],
+        [InlineKeyboardButton("🔛 Вкл/Выкл", callback_data="admin:promo:toggle")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="admin:promo:stats")],
+        [InlineKeyboardButton("⬅ Назад", callback_data="admin:panel")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -119,41 +205,385 @@ def stats_text(cfg: SalesConfig, supervisor: InstanceSupervisor) -> str:
         if supervisor.is_running(int(row["user_id"])):
             running += 1
     return (
-        "Статистика\n\n"
-        f"Пользователей: {int(stats['users_total'])}\n"
-        f"Заказов всего: {int(stats['orders_total'])}\n"
-        f"Оплачено: {int(stats['orders_paid'])}\n"
-        f"В ожидании: {int(stats['orders_pending'])}\n"
-        f"Истекших инвойсов: {int(stats['orders_expired'])}\n"
-        f"Выручка (paid): {stats['revenue_paid_usdt']:.2f} USDT\n\n"
-        f"Лицензий всего: {int(stats['licenses_total'])}\n"
-        f"Активных: {int(stats['licenses_active'])}\n"
-        f"Ожидают токен: {int(stats['licenses_pending_token'])}\n"
-        f"Истекли: {int(stats['licenses_expired'])}\n"
-        f"Остановлены: {int(stats['licenses_stopped'])}\n"
-        f"Сейчас запущено инстансов: {running}\n\n"
-        f"Пользователей с приоритетом: {int(stats['priority_users'])}\n\n"
+        "📊 Статистика\n\n"
+        f"👥 Пользователей: {int(stats['users_total'])}\n"
+        f"🧾 Заказов всего: {int(stats['orders_total'])}\n"
+        f"✅ Оплачено: {int(stats['orders_paid'])}\n"
+        f"⏳ В ожидании: {int(stats['orders_pending'])}\n"
+        f"⌛ Истекших инвойсов: {int(stats['orders_expired'])}\n"
+        f"💰 Выручка (paid): {stats['revenue_paid_usdt']:.2f} USDT\n\n"
+        f"🎫 Лицензий всего: {int(stats['licenses_total'])}\n"
+        f"🟢 Активных: {int(stats['licenses_active'])}\n"
+        f"🔑 Ожидают токен: {int(stats['licenses_pending_token'])}\n"
+        f"⛔ Истекли: {int(stats['licenses_expired'])}\n"
+        f"🛑 Остановлены: {int(stats['licenses_stopped'])}\n"
+        f"⚙️ Сейчас запущено инстансов: {running}\n\n"
+        f"⭐ Пользователей с приоритетом: {int(stats['priority_users'])}\n\n"
         "Команды:\n"
         "выдать приоритет @username\n"
         "снять приоритет @username"
     )
 
 
+def promo_list_text(rows) -> str:
+    if not rows:
+        return "🎁 Акции\n\nПока нет активных/созданных акций."
+    lines = ["🎁 Акции", ""]
+    for r in rows:
+        status = "✅" if int(r["is_active"] or 0) else "❌"
+        lines.append(
+            f"{r['id']} | {status} {r['title']} | {r['plan_key']} | +{r['bonus_days']} дн | "
+            f"{format_date(r['start_ts'])}–{format_date(r['end_ts'])}"
+        )
+    return "\n".join(lines)
+
+
+def promo_stats_text(stats: dict) -> str:
+    promo = stats["promo"]
+    status = "✅" if int(promo["is_active"] or 0) else "❌"
+    return (
+        "📊 Статистика акции\n\n"
+        f"ID: {promo['id']}\n"
+        f"{status} {promo['title']}\n"
+        f"План: {promo['plan_key']}\n"
+        f"Бонус: +{promo['bonus_days']} дн\n"
+        f"Период: {format_date(promo['start_ts'])}–{format_date(promo['end_ts'])}\n\n"
+        f"Оплаченных заказов: {stats['orders_paid']}\n"
+        f"Уникальных покупателей: {stats['users_paid']}\n"
+        f"Выручка: {stats['revenue_usdt']:.2f} USDT"
+    )
+
+
+async def handle_admin_state_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    cfg: SalesConfig,
+    supervisor: InstanceSupervisor,
+) -> bool:
+    state = get_admin_state(context)
+    if not state:
+        return False
+
+    msg = update.effective_message
+    text = (msg.text or msg.caption or "").strip()
+    has_photo = bool(getattr(msg, "photo", None))
+
+    if not text and not has_photo:
+        return True
+
+    if text.lower() in ("отмена", "cancel", "/cancel"):
+        clear_admin_state(context)
+        await update.effective_message.reply_text("Действие отменено.", reply_markup=admin_panel_menu())
+        return True
+
+    name = state.get("name")
+    data = state.get("data", {})
+
+    if name == "admin_delete_sub":
+        user_row = resolve_user_by_username_or_id(cfg, text)
+        if user_row is None:
+            await update.effective_message.reply_text("Пользователь не найден. Введите ID или @username.")
+            return True
+        deleted = delete_license(cfg, int(user_row["user_id"]))
+        supervisor.sync_user(int(user_row["user_id"]))
+        clear_admin_state(context)
+        if deleted:
+            await update.effective_message.reply_text("Подписка удалена.", reply_markup=admin_panel_menu())
+        else:
+            await update.effective_message.reply_text("Подписка не найдена.", reply_markup=admin_panel_menu())
+        return True
+
+    if name == "admin_backdate_sub":
+        match = DATE_RE.search(text)
+        if not match:
+            await update.effective_message.reply_text("Укажите дату в формате ДД.ММ.ГГГГ.")
+            return True
+        date_str = match.group(1)
+        target = text.replace(date_str, "").replace("|", " ").strip()
+        if not target:
+            await update.effective_message.reply_text("Укажите ID или @username пользователя.")
+            return True
+        user_row = resolve_user_by_username_or_id(cfg, target)
+        if user_row is None:
+            await update.effective_message.reply_text("Пользователь не найден. Введите ID или @username.")
+            return True
+        dt = parse_date(date_str)
+        if not dt:
+            await update.effective_message.reply_text("Неверная дата. Формат: ДД.ММ.ГГГГ.")
+            return True
+        start_ts = int(dt.timestamp())
+        updated = set_license_start_date(cfg, int(user_row["user_id"]), start_ts)
+        supervisor.sync_user(int(user_row["user_id"]))
+        clear_admin_state(context)
+        if not updated:
+            await update.effective_message.reply_text("Подписка не найдена.", reply_markup=admin_panel_menu())
+            return True
+        await update.effective_message.reply_text(
+            "Дата покупки изменена.\n"
+            f"Старт: {format_date(start_ts)}\n"
+            f"Истекает: {format_expiration(updated['expires_at'])}",
+            reply_markup=admin_panel_menu(),
+        )
+        return True
+
+    if name == "admin_broadcast":
+        if not text and not has_photo:
+            await update.effective_message.reply_text("Пришлите текст или фото для рассылки.")
+            return True
+
+        button_text = None
+        button_url = None
+        cleaned_lines = []
+        for line in (text.splitlines() if text else []):
+            low = line.strip().lower()
+            if low.startswith("кнопка:") or low.startswith("button:"):
+                rest = line.split(":", 1)[1].strip()
+                if "|" in rest:
+                    bt, bu = [p.strip() for p in rest.split("|", 1)]
+                    if bt and bu and bu.startswith("http"):
+                        button_text = bt
+                        button_url = bu
+                        continue
+            cleaned_lines.append(line)
+        clean_text = "\n".join(cleaned_lines).strip()
+        reply_markup = None
+        if button_text and button_url:
+            reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(button_text, url=button_url)]])
+
+        photo_id = msg.photo[-1].file_id if has_photo else None
+        user_ids = list_user_ids(cfg)
+        sent = 0
+        failed = 0
+        for uid in user_ids:
+            try:
+                if photo_id:
+                    await context.bot.send_photo(
+                        chat_id=uid,
+                        photo=photo_id,
+                        caption=clean_text if clean_text else None,
+                        reply_markup=reply_markup,
+                    )
+                else:
+                    if not clean_text:
+                        failed += 1
+                        continue
+                    await context.bot.send_message(chat_id=uid, text=clean_text, reply_markup=reply_markup)
+                sent += 1
+            except Exception:
+                failed += 1
+        clear_admin_state(context)
+        await update.effective_message.reply_text(
+            f"Рассылка завершена.\nОтправлено: {sent}\nОшибок: {failed}",
+            reply_markup=admin_panel_menu(),
+        )
+        return True
+
+    if name == "promo_add_title":
+        data["title"] = text
+        set_admin_state(context, "promo_add_plan", data)
+        await update.effective_message.reply_text("План: week / month / lifetime")
+        return True
+
+    if name == "promo_add_plan":
+        plan_key = parse_plan_key(text)
+        if not plan_key:
+            await update.effective_message.reply_text("Неверный план. Используйте: week / month / lifetime.")
+            return True
+        data["plan_key"] = plan_key
+        set_admin_state(context, "promo_add_start", data)
+        await update.effective_message.reply_text("Дата начала (ДД.ММ.ГГГГ):")
+        return True
+
+    if name == "promo_add_start":
+        dt = parse_date(text)
+        if not dt:
+            await update.effective_message.reply_text("Неверная дата. Формат: ДД.ММ.ГГГГ.")
+            return True
+        start_ts = int(dt.timestamp())
+        data["start_ts"] = start_ts
+        set_admin_state(context, "promo_add_end", data)
+        await update.effective_message.reply_text("Дата окончания (ДД.ММ.ГГГГ):")
+        return True
+
+    if name == "promo_add_end":
+        dt = parse_date(text)
+        if not dt:
+            await update.effective_message.reply_text("Неверная дата. Формат: ДД.ММ.ГГГГ.")
+            return True
+        end_ts = int((dt + timedelta(days=1) - timedelta(seconds=1)).timestamp())
+        if end_ts < int(data.get("start_ts", 0)):
+            await update.effective_message.reply_text("Дата окончания меньше даты начала.")
+            return True
+        data["end_ts"] = end_ts
+        set_admin_state(context, "promo_add_bonus", data)
+        await update.effective_message.reply_text("Бонус дней (число):")
+        return True
+
+    if name == "promo_add_bonus":
+        try:
+            bonus_days = int(text)
+        except ValueError:
+            await update.effective_message.reply_text("Введите число бонусных дней.")
+            return True
+        promo_id = add_promotion(
+            cfg,
+            data.get("title", "Акция"),
+            data["plan_key"],
+            bonus_days,
+            int(data["start_ts"]),
+            int(data["end_ts"]),
+            1,
+        )
+        clear_admin_state(context)
+        await update.effective_message.reply_text(
+            f"Акция добавлена. ID: {promo_id}",
+            reply_markup=admin_promos_menu(),
+        )
+        return True
+
+    if name == "promo_edit_id":
+        try:
+            promo_id = int(text)
+        except ValueError:
+            await update.effective_message.reply_text("Введите числовой ID акции.")
+            return True
+        promo = get_promotion(cfg, promo_id)
+        if promo is None:
+            await update.effective_message.reply_text("Акция не найдена.")
+            return True
+        data = {"promo_id": promo_id}
+        set_admin_state(context, "promo_edit_title", data)
+        await update.effective_message.reply_text("Новое название акции:")
+        return True
+
+    if name == "promo_edit_title":
+        data["title"] = text
+        set_admin_state(context, "promo_edit_plan", data)
+        await update.effective_message.reply_text("План: week / month / lifetime")
+        return True
+
+    if name == "promo_edit_plan":
+        plan_key = parse_plan_key(text)
+        if not plan_key:
+            await update.effective_message.reply_text("Неверный план. Используйте: week / month / lifetime.")
+            return True
+        data["plan_key"] = plan_key
+        set_admin_state(context, "promo_edit_start", data)
+        await update.effective_message.reply_text("Дата начала (ДД.ММ.ГГГГ):")
+        return True
+
+    if name == "promo_edit_start":
+        dt = parse_date(text)
+        if not dt:
+            await update.effective_message.reply_text("Неверная дата. Формат: ДД.ММ.ГГГГ.")
+            return True
+        data["start_ts"] = int(dt.timestamp())
+        set_admin_state(context, "promo_edit_end", data)
+        await update.effective_message.reply_text("Дата окончания (ДД.ММ.ГГГГ):")
+        return True
+
+    if name == "promo_edit_end":
+        dt = parse_date(text)
+        if not dt:
+            await update.effective_message.reply_text("Неверная дата. Формат: ДД.ММ.ГГГГ.")
+            return True
+        end_ts = int((dt + timedelta(days=1) - timedelta(seconds=1)).timestamp())
+        if end_ts < int(data.get("start_ts", 0)):
+            await update.effective_message.reply_text("Дата окончания меньше даты начала.")
+            return True
+        data["end_ts"] = end_ts
+        set_admin_state(context, "promo_edit_bonus", data)
+        await update.effective_message.reply_text("Бонус дней (число):")
+        return True
+
+    if name == "promo_edit_bonus":
+        try:
+            bonus_days = int(text)
+        except ValueError:
+            await update.effective_message.reply_text("Введите число бонусных дней.")
+            return True
+        updated = update_promotion(
+            cfg,
+            int(data["promo_id"]),
+            data.get("title", "Акция"),
+            data["plan_key"],
+            bonus_days,
+            int(data["start_ts"]),
+            int(data["end_ts"]),
+            1,
+        )
+        clear_admin_state(context)
+        await update.effective_message.reply_text(
+            "Акция обновлена." if updated else "Акция не найдена.",
+            reply_markup=admin_promos_menu(),
+        )
+        return True
+
+    if name == "promo_delete_id":
+        try:
+            promo_id = int(text)
+        except ValueError:
+            await update.effective_message.reply_text("Введите числовой ID акции.")
+            return True
+        deleted = delete_promotion(cfg, promo_id)
+        clear_admin_state(context)
+        await update.effective_message.reply_text(
+            "Акция удалена." if deleted else "Акция не найдена.",
+            reply_markup=admin_promos_menu(),
+        )
+        return True
+
+    if name == "promo_toggle_id":
+        try:
+            promo_id = int(text)
+        except ValueError:
+            await update.effective_message.reply_text("Введите числовой ID акции.")
+            return True
+        promo = get_promotion(cfg, promo_id)
+        if promo is None:
+            await update.effective_message.reply_text("Акция не найдена.")
+            return True
+        new_active = 0 if int(promo["is_active"] or 0) else 1
+        set_promotion_active(cfg, promo_id, new_active)
+        clear_admin_state(context)
+        await update.effective_message.reply_text(
+            f"Акция {'включена' if new_active else 'выключена'}.",
+            reply_markup=admin_promos_menu(),
+        )
+        return True
+
+    if name == "promo_stats_id":
+        try:
+            promo_id = int(text)
+        except ValueError:
+            await update.effective_message.reply_text("Введите числовой ID акции.")
+            return True
+        stats = get_promo_stats(cfg, promo_id)
+        clear_admin_state(context)
+        if not stats:
+            await update.effective_message.reply_text("Акция не найдена.", reply_markup=admin_promos_menu())
+            return True
+        await update.effective_message.reply_text(promo_stats_text(stats), reply_markup=admin_promos_menu())
+        return True
+
+    return False
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cfg, _, _, _ = get_runtime(context)
     upsert_user(cfg, update.effective_user)
     text = (
-        "Продажа AUTO VBIV\n\n"
+        "🚀 AUTO VBIV — подписка и запуск бота\n\n"
         "1) Выберите тариф.\n"
         "2) Оплатите через Crypto Bot.\n"
-        "3) После оплаты отправьте токен своего бота.\n"
-        "4) Бот запустится автоматически.\n\n"
-        "Команда: /status"
+        "3) Отправьте токен своего бота.\n"
+        "4) Запуск происходит автоматически.\n\n"
+        "ℹ️ Команда: /status"
     )
     await update.effective_message.reply_text(text, reply_markup=main_menu(cfg))
 
     if int(update.effective_user.id) in cfg.owner_ids:
-        await update.effective_message.reply_text("Режим владельца.", reply_markup=owner_menu())
+        await update.effective_message.reply_text("🛠 Режим владельца.", reply_markup=owner_menu())
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -211,6 +641,90 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text("Нет доступа.")
             return
         await query.message.reply_text(stats_text(cfg, supervisor), reply_markup=admin_panel_menu())
+        return
+
+    if data == "admin:subs":
+        if not is_owner(cfg, user_id):
+            await query.message.reply_text("Нет доступа.")
+            return
+        await query.message.reply_text("🧾 Управление подписками:", reply_markup=admin_subs_menu())
+        return
+
+    if data == "admin:subs:delete":
+        if not is_owner(cfg, user_id):
+            await query.message.reply_text("Нет доступа.")
+            return
+        set_admin_state(context, "admin_delete_sub")
+        await query.message.reply_text("Введите ID или @username пользователя для удаления подписки:")
+        return
+
+    if data == "admin:subs:backdate":
+        if not is_owner(cfg, user_id):
+            await query.message.reply_text("Нет доступа.")
+            return
+        set_admin_state(context, "admin_backdate_sub")
+        await query.message.reply_text("Введите ID/@username и дату покупки (ДД.ММ.ГГГГ).\nПример: 123456 10.03.2026")
+        return
+
+    if data == "admin:promos":
+        if not is_owner(cfg, user_id):
+            await query.message.reply_text("Нет доступа.")
+            return
+        promos = list_promotions(cfg)
+        await query.message.reply_text(promo_list_text(promos), reply_markup=admin_promos_menu())
+        return
+
+    if data == "admin:promo:add":
+        if not is_owner(cfg, user_id):
+            await query.message.reply_text("Нет доступа.")
+            return
+        set_admin_state(context, "promo_add_title")
+        await query.message.reply_text("Введите название акции:")
+        return
+
+    if data == "admin:promo:edit":
+        if not is_owner(cfg, user_id):
+            await query.message.reply_text("Нет доступа.")
+            return
+        set_admin_state(context, "promo_edit_id")
+        await query.message.reply_text("Введите ID акции для изменения:")
+        return
+
+    if data == "admin:promo:delete":
+        if not is_owner(cfg, user_id):
+            await query.message.reply_text("Нет доступа.")
+            return
+        set_admin_state(context, "promo_delete_id")
+        await query.message.reply_text("Введите ID акции для удаления:")
+        return
+
+    if data == "admin:promo:toggle":
+        if not is_owner(cfg, user_id):
+            await query.message.reply_text("Нет доступа.")
+            return
+        set_admin_state(context, "promo_toggle_id")
+        await query.message.reply_text("Введите ID акции для Вкл/Выкл:")
+        return
+
+    if data == "admin:promo:stats":
+        if not is_owner(cfg, user_id):
+            await query.message.reply_text("Нет доступа.")
+            return
+        set_admin_state(context, "promo_stats_id")
+        await query.message.reply_text("Введите ID акции для статистики:")
+        return
+
+    if data == "admin:broadcast":
+        if not is_owner(cfg, user_id):
+            await query.message.reply_text("Нет доступа.")
+            return
+        set_admin_state(context, "admin_broadcast")
+        await query.message.reply_text(
+            "Отправьте сообщение для рассылки (текст или фото).\n"
+            "Кнопка: добавьте строку вида\n"
+            "Кнопка: Текст | https://example.com\n"
+            "Для отмены напишите «отмена»."
+        )
         return
 
     if data.startswith("buy:"):
@@ -343,7 +857,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text("Нет доступа.")
             return
 
-        rows = list_licenses(cfg)
+        rows = list_licenses_with_users(cfg)
         if not rows:
             await query.message.reply_text("Клиентов пока нет.")
             return
@@ -351,11 +865,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         lines = [f"Клиентов: {len(rows)}"]
         for row in rows[:40]:
             uid = row["user_id"]
-            username = row["bot_username"] or "-"
+            buyer_username = row["username"] or "-"
+            name_parts = [row["first_name"] or "", row["last_name"] or ""]
+            buyer_name = " ".join(part for part in name_parts if part).strip() or "-"
+            bot_username = row["bot_username"] or "-"
             status = row["status"]
             exp = format_expiration(row["expires_at"])
             priority_flag = "PRIORITY" if is_priority_user(cfg, int(uid)) else "-"
-            lines.append(f"{uid} | @{username} | {status} | до {exp} | {priority_flag}")
+            lines.append(
+                f"{uid} | @{buyer_username} | {buyer_name} | бот @{bot_username} | {row['plan_key']} | "
+                f"{status} | до {exp} | {priority_flag}"
+            )
         await query.message.reply_text("\n".join(lines), reply_markup=admin_panel_menu())
         return
 
@@ -380,10 +900,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat.type != "private":
         return
-    text = (update.effective_message.text or "").strip()
-    if not text:
+    msg = update.effective_message
+    text = (msg.text or msg.caption or "").strip()
+    has_photo = bool(getattr(msg, "photo", None))
+    if not text and not has_photo:
         return
-    if text.startswith("/"):
+    if text.startswith("/") and not has_photo:
         return
 
     cfg, _, supervisor, cipher = get_runtime(context)
@@ -391,6 +913,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     upsert_user(cfg, update.effective_user)
 
     if is_owner(cfg, user_id):
+        if await handle_admin_state_input(update, context, cfg, supervisor):
+            return
         action, target = parse_priority_command(text)
         if action:
             if not target:
@@ -538,7 +1062,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_text))
 
     try:
         app.run_polling()

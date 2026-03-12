@@ -224,6 +224,18 @@ def init_db(cfg: SalesConfig) -> None:
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS promotions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            plan_key TEXT NOT NULL,
+            bonus_days INTEGER NOT NULL,
+            start_ts INTEGER NOT NULL,
+            end_ts INTEGER NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
         """
     )
     conn.commit()
@@ -551,17 +563,21 @@ def _resolve_instance_dir(cfg: SalesConfig, user_id: int) -> Path:
     return cfg.instances_dir / f"user_{user_id}"
 
 
-def apply_paid_plan(cfg: SalesConfig, user_id: int, plan_key: str) -> sqlite3.Row:
+def apply_paid_plan(cfg: SalesConfig, user_id: int, plan_key: str, purchase_ts: Optional[int] = None) -> sqlite3.Row:
     plan = cfg.plans.get(plan_key)
     if not plan:
         raise RuntimeError(f"Unknown plan: {plan_key}")
 
-    ts = now_ts()
+    ts = purchase_ts or now_ts()
+    bonus_days = get_promo_bonus_days(cfg, plan.key, ts)
+    total_days = plan.duration_days
+    if plan.duration_days > 0 and bonus_days > 0:
+        total_days += bonus_days
     conn = get_conn(cfg)
     row = conn.execute("SELECT * FROM licenses WHERE user_id = ?", (user_id,)).fetchone()
 
     if row is None:
-        expires_at = None if plan.duration_days == 0 else ts + plan.duration_days * SECONDS_IN_DAY
+        expires_at = None if plan.duration_days == 0 else ts + total_days * SECONDS_IN_DAY
         instance_dir = str(_resolve_instance_dir(cfg, user_id))
         status = "pending_token"
         conn.execute(
@@ -581,7 +597,7 @@ def apply_paid_plan(cfg: SalesConfig, user_id: int, plan_key: str) -> sqlite3.Ro
             base = ts
             if old_expires and old_expires > ts:
                 base = old_expires
-            new_expires = base + plan.duration_days * SECONDS_IN_DAY
+            new_expires = base + total_days * SECONDS_IN_DAY
 
         status = "active" if token_present else "pending_token"
         conn.execute(
@@ -667,6 +683,205 @@ def list_licenses(cfg: SalesConfig) -> List[sqlite3.Row]:
     rows = conn.execute("SELECT * FROM licenses ORDER BY updated_at DESC").fetchall()
     conn.close()
     return rows
+
+
+def list_licenses_with_users(cfg: SalesConfig) -> List[sqlite3.Row]:
+    conn = get_conn(cfg)
+    rows = conn.execute(
+        "SELECT l.*, u.username, u.first_name, u.last_name "
+        "FROM licenses l LEFT JOIN users u ON u.user_id = l.user_id "
+        "ORDER BY l.updated_at DESC"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def list_user_ids(cfg: SalesConfig) -> List[int]:
+    conn = get_conn(cfg)
+    rows = conn.execute("SELECT user_id FROM users ORDER BY user_id").fetchall()
+    conn.close()
+    return [int(r["user_id"]) for r in rows]
+
+
+def delete_license(cfg: SalesConfig, user_id: int) -> bool:
+    conn = get_conn(cfg)
+    cur = conn.execute("DELETE FROM licenses WHERE user_id = ?", (int(user_id),))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def set_license_start_date(cfg: SalesConfig, user_id: int, start_ts: int) -> Optional[sqlite3.Row]:
+    conn = get_conn(cfg)
+    row = conn.execute("SELECT * FROM licenses WHERE user_id = ?", (int(user_id),)).fetchone()
+    if row is None:
+        conn.close()
+        return None
+
+    plan_key = row["plan_key"]
+    plan = cfg.plans.get(plan_key)
+    if not plan:
+        conn.close()
+        return None
+
+    bonus_days = get_promo_bonus_days(cfg, plan.key, int(start_ts))
+    total_days = plan.duration_days
+    if plan.duration_days > 0 and bonus_days > 0:
+        total_days += bonus_days
+
+    if plan.duration_days == 0:
+        expires_at = None
+    else:
+        expires_at = int(start_ts) + total_days * SECONDS_IN_DAY
+
+    ts = now_ts()
+    token_present = bool(row["token_encrypted"])
+    if expires_at is not None and expires_at <= ts:
+        status = "expired"
+    else:
+        status = "active" if token_present else "pending_token"
+
+    conn.execute(
+        "UPDATE licenses SET expires_at = ?, status = ?, updated_at = ? WHERE user_id = ?",
+        (expires_at, status, ts, int(user_id)),
+    )
+    conn.commit()
+    updated = conn.execute("SELECT * FROM licenses WHERE user_id = ?", (int(user_id),)).fetchone()
+    conn.close()
+    return updated
+
+
+def list_promotions(cfg: SalesConfig) -> List[sqlite3.Row]:
+    conn = get_conn(cfg)
+    rows = conn.execute("SELECT * FROM promotions ORDER BY id DESC").fetchall()
+    conn.close()
+    return rows
+
+
+def get_promotion(cfg: SalesConfig, promo_id: int) -> Optional[sqlite3.Row]:
+    conn = get_conn(cfg)
+    row = conn.execute("SELECT * FROM promotions WHERE id = ?", (int(promo_id),)).fetchone()
+    conn.close()
+    return row
+
+
+def set_promotion_active(cfg: SalesConfig, promo_id: int, is_active: int) -> bool:
+    ts = now_ts()
+    conn = get_conn(cfg)
+    cur = conn.execute(
+        "UPDATE promotions SET is_active = ?, updated_at = ? WHERE id = ?",
+        (int(is_active), ts, int(promo_id)),
+    )
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def add_promotion(
+    cfg: SalesConfig,
+    title: str,
+    plan_key: str,
+    bonus_days: int,
+    start_ts: int,
+    end_ts: int,
+    is_active: int = 1,
+) -> int:
+    ts = now_ts()
+    conn = get_conn(cfg)
+    cur = conn.execute(
+        "INSERT INTO promotions(title, plan_key, bonus_days, start_ts, end_ts, is_active, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            title,
+            plan_key,
+            int(bonus_days),
+            int(start_ts),
+            int(end_ts),
+            int(is_active),
+            ts,
+            ts,
+        ),
+    )
+    conn.commit()
+    promo_id = int(cur.lastrowid)
+    conn.close()
+    return promo_id
+
+
+def update_promotion(
+    cfg: SalesConfig,
+    promo_id: int,
+    title: str,
+    plan_key: str,
+    bonus_days: int,
+    start_ts: int,
+    end_ts: int,
+    is_active: int = 1,
+) -> bool:
+    ts = now_ts()
+    conn = get_conn(cfg)
+    cur = conn.execute(
+        "UPDATE promotions SET title = ?, plan_key = ?, bonus_days = ?, start_ts = ?, end_ts = ?, "
+        "is_active = ?, updated_at = ? WHERE id = ?",
+        (
+            title,
+            plan_key,
+            int(bonus_days),
+            int(start_ts),
+            int(end_ts),
+            int(is_active),
+            ts,
+            int(promo_id),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def delete_promotion(cfg: SalesConfig, promo_id: int) -> bool:
+    conn = get_conn(cfg)
+    cur = conn.execute("DELETE FROM promotions WHERE id = ?", (int(promo_id),))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def get_promo_bonus_days(cfg: SalesConfig, plan_key: str, ts: int) -> int:
+    conn = get_conn(cfg)
+    rows = conn.execute(
+        "SELECT bonus_days FROM promotions WHERE is_active = 1 AND plan_key = ? "
+        "AND start_ts <= ? AND end_ts >= ?",
+        (plan_key, int(ts), int(ts)),
+    ).fetchall()
+    conn.close()
+    if not rows:
+        return 0
+    return max(int(r["bonus_days"] or 0) for r in rows)
+
+
+def get_promo_stats(cfg: SalesConfig, promo_id: int) -> Optional[dict]:
+    promo = get_promotion(cfg, promo_id)
+    if promo is None:
+        return None
+    conn = get_conn(cfg)
+    paid_row = conn.execute(
+        "SELECT COUNT(*) AS cnt, COALESCE(SUM(amount_usdt), 0) AS total "
+        "FROM orders WHERE status = 'paid' AND plan_key = ? AND paid_at BETWEEN ? AND ?",
+        (promo["plan_key"], int(promo["start_ts"]), int(promo["end_ts"])),
+    ).fetchone()
+    users_row = conn.execute(
+        "SELECT COUNT(DISTINCT user_id) AS cnt "
+        "FROM orders WHERE status = 'paid' AND plan_key = ? AND paid_at BETWEEN ? AND ?",
+        (promo["plan_key"], int(promo["start_ts"]), int(promo["end_ts"])),
+    ).fetchone()
+    conn.close()
+    return {
+        "promo": promo,
+        "orders_paid": int(paid_row["cnt"] or 0),
+        "users_paid": int(users_row["cnt"] or 0),
+        "revenue_usdt": float(paid_row["total"] or 0),
+    }
 
 
 def set_license_status(cfg: SalesConfig, user_id: int, status: str) -> None:
