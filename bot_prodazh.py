@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import re
+import sqlite3
+import zipfile
 from pathlib import Path
 
 from datetime import datetime, timedelta
@@ -262,6 +264,22 @@ def promo_stats_text(stats: dict) -> str:
         f"Уникальных покупателей: {stats['users_paid']}\n"
         f"Выручка: {stats['revenue_usdt']:.2f} USDT"
     )
+
+
+def _validate_sqlite_db(path: Path) -> tuple[bool, str]:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(16)
+        if header != b"SQLite format 3\x00":
+            return False, "Файл не похож на SQLite базу."
+        conn = sqlite3.connect(str(path))
+        row = conn.execute("PRAGMA integrity_check").fetchone()
+        conn.close()
+        if not row or row[0] != "ok":
+            return False, f"Integrity check: {row[0] if row else 'error'}"
+    except Exception as exc:
+        return False, f"Ошибка SQLite: {exc}"
+    return True, ""
 
 
 async def handle_admin_state_input(
@@ -602,21 +620,46 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     db_path = cfg.sales_db_path
     backup_path = None
+    tmp_path = db_path.with_suffix(db_path.suffix + f".upload_{now_ts()}")
+    tmp_zip = db_path.with_suffix(".upload.zip")
     try:
+        file = await context.bot.get_file(doc.file_id)
+        if doc.file_name and doc.file_name.lower().endswith(".zip"):
+            await file.download_to_drive(custom_path=str(tmp_zip))
+            with zipfile.ZipFile(tmp_zip, "r") as zf:
+                db_names = [n for n in zf.namelist() if n.lower().endswith(".db")]
+                if not db_names:
+                    raise RuntimeError("В архиве нет .db файла.")
+                with zf.open(db_names[0], "r") as src, tmp_path.open("wb") as dst:
+                    dst.write(src.read())
+        else:
+            await file.download_to_drive(custom_path=str(tmp_path))
+
+        ok, err = _validate_sqlite_db(tmp_path)
+        if not ok:
+            raise RuntimeError(err)
+
         supervisor.shutdown()
         if db_path.exists():
             backup_path = db_path.with_suffix(db_path.suffix + f".bak_{now_ts()}")
             db_path.replace(backup_path)
-
-        file = await context.bot.get_file(doc.file_id)
-        await file.download_to_drive(custom_path=str(db_path))
-
+        tmp_path.replace(db_path)
         init_db(cfg)
         supervisor.start()
         clear_admin_state(context)
         backup_note = f"\nРезервная копия: {backup_path.name}" if backup_path else ""
         await msg.reply_text(f"✅ База загружена.{backup_note}", reply_markup=admin_panel_menu())
     except Exception as exc:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        try:
+            if tmp_zip.exists():
+                tmp_zip.unlink()
+        except Exception:
+            pass
         try:
             if backup_path and backup_path.exists():
                 if db_path.exists():
