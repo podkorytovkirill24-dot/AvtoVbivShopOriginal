@@ -122,7 +122,6 @@ def main_menu(cfg: SalesConfig) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"🛒 Купить неделю ({week.price_usdt:.2f} USDT)", callback_data="buy:week")],
         [InlineKeyboardButton(f"🛒 Купить месяц ({month.price_usdt:.2f} USDT)", callback_data="buy:month")],
         [InlineKeyboardButton(f"🏆 Купить навсегда ({lifetime.price_usdt:.2f} USDT)", callback_data="buy:lifetime")],
-        [InlineKeyboardButton("👤 Моя подписка", callback_data="my_license")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -280,6 +279,32 @@ def _validate_sqlite_db(path: Path) -> tuple[bool, str]:
     except Exception as exc:
         return False, f"Ошибка SQLite: {exc}"
     return True, ""
+
+
+def _export_sqlite_db(src_path: Path, dst_path: Path) -> None:
+    if dst_path.exists():
+        try:
+            dst_path.unlink()
+        except Exception:
+            pass
+    conn = sqlite3.connect(str(src_path))
+    try:
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            pass
+        try:
+            conn.execute("VACUUM INTO ?", (str(dst_path),))
+            return
+        except Exception:
+            pass
+        dst = sqlite3.connect(str(dst_path))
+        try:
+            conn.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        conn.close()
 
 
 async def handle_admin_state_input(
@@ -728,11 +753,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == "my_license":
-        row = get_license(cfg, user_id)
-        text = describe_license(row)
-        if row is not None:
-            text += f"\nЗапущен: {'Да' if supervisor.is_running(user_id) else 'Нет'}"
-        await query.message.reply_text(text, reply_markup=main_menu(cfg))
+        await query.message.reply_text("Раздел отключен.", reply_markup=main_menu(cfg))
         return
 
     if data == "admin:panel":
@@ -848,8 +869,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not db_path.exists():
             await query.message.reply_text("Файл базы не найден.")
             return
+        ok, err = _validate_sqlite_db(db_path)
+        if not ok:
+            size = db_path.stat().st_size if db_path.exists() else 0
+            await query.message.reply_text(
+                "База повреждена или пустая.\n"
+                f"Размер файла: {size} байт\n"
+                f"Путь: {db_path}\n"
+                f"Ошибка: {err}"
+            )
+            return
         filename = f"sales_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        await query.message.reply_document(InputFile(str(db_path), filename=filename))
+        tmp_path = db_path.with_suffix(db_path.suffix + f".dump_{now_ts()}")
+        try:
+            _export_sqlite_db(db_path, tmp_path)
+            await query.message.reply_document(InputFile(str(tmp_path), filename=filename))
+        finally:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
         return
 
     if data == "admin:db:upload":
