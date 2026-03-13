@@ -25,7 +25,7 @@ async def handle_group_submission(update: Update, context: ContextTypes.DEFAULT_
         return
     if get_config_bool(conn, "stop_work"):
         conn.close()
-        await update.message.reply_text("Приемка на паузе. Попробуйте позже.")
+        await update.message.reply_text("⛔ STOP-WORK\nПриемка временно на паузе. Попробуйте позже.")
         return
 
     upsert_user(conn, update.effective_user)
@@ -36,6 +36,12 @@ async def handle_group_submission(update: Update, context: ContextTypes.DEFAULT_
     ).fetchone()["cnt"]
 
     created_at = now_ts()
+    if get_config_bool(conn, "i_am_here_on"):
+        conn.execute(
+            "UPDATE users SET iam_here_at = CASE WHEN iam_here_at > 0 THEN iam_here_at ELSE ? END, "
+            "iam_warned_at = 0 WHERE user_id = ?",
+            (created_at, update.effective_user.id),
+        )
     photo_id = None
     if update.message.photo:
         photo_id = update.message.photo[-1].file_id

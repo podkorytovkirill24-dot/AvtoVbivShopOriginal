@@ -23,7 +23,9 @@ def init_db() -> None:
             referred_by INTEGER,
             subscription_until INTEGER DEFAULT 0,
             created_at INTEGER,
-            last_seen INTEGER
+            last_seen INTEGER,
+            iam_here_at INTEGER DEFAULT 0,
+            iam_warned_at INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS tariffs (
@@ -62,6 +64,7 @@ def init_db() -> None:
             worker_id INTEGER,
             worker_chat_id INTEGER,
             worker_msg_id INTEGER,
+            worker_thread_id INTEGER,
             tariff_id INTEGER,
             department_id INTEGER,
             photo_file_id TEXT,
@@ -106,6 +109,7 @@ def init_db() -> None:
             chat_id INTEGER NOT NULL,
             thread_id INTEGER NOT NULL,
             reception_chat_id INTEGER NOT NULL,
+            chat_title TEXT,
             UNIQUE(chat_id, thread_id)
         );
 

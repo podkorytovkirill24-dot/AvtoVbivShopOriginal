@@ -44,20 +44,9 @@ def submit_numbers_from_miniapp(
 
         allow_repeat = get_config_bool(conn, "allow_repeat", True)
         limit_per_day = get_config_int(conn, "limit_per_day", 0)
-        require_sub = get_config_bool(conn, "require_subscription", False)
         if get_config_bool(conn, "stop_work"):
             conn.rollback()
-            return {"ok": False, "error": "Приемка на паузе. Попробуйте позже."}
-
-        if require_sub:
-            sub_row = conn.execute(
-                "SELECT subscription_until FROM users WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()
-            sub_until = sub_row["subscription_until"] if sub_row else 0
-            if not sub_until or sub_until < now_ts():
-                conn.rollback()
-                return {"ok": False, "error": "Подписка не активна."}
+            return {"ok": False, "error": "⛔ STOP-WORK. Приемка временно на паузе."}
 
         if limit_per_day > 0:
             start_day = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
@@ -75,6 +64,12 @@ def submit_numbers_from_miniapp(
         ).fetchone()["cnt"]
 
         created_at = now_ts()
+        if get_config_bool(conn, "i_am_here_on"):
+            conn.execute(
+                "UPDATE users SET iam_here_at = CASE WHEN iam_here_at > 0 THEN iam_here_at ELSE ? END, "
+                "iam_warned_at = 0 WHERE user_id = ?",
+                (created_at, user_id),
+            )
         accepted = []
         skipped = []
         for idx, phone in enumerate(numbers, start=1):

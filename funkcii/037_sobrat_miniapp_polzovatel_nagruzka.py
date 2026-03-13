@@ -3,7 +3,7 @@ def build_miniapp_user_payload(user_id: int) -> Dict:
     try:
         is_admin_user = is_admin(conn, user_id)
         user = conn.execute(
-            "SELECT username, first_name, last_name, created_at, last_seen, subscription_until "
+            "SELECT username, first_name, last_name, created_at, last_seen "
             "FROM users WHERE user_id = ?",
             (user_id,),
         ).fetchone()
@@ -118,7 +118,6 @@ def build_miniapp_user_payload(user_id: int) -> Dict:
                 "full_name": full_name,
                 "created_at": format_ts(user["created_at"]) if user else "-",
                 "last_seen": format_ts(user["last_seen"]) if user else "-",
-                "subscription_until": format_ts(user["subscription_until"]) if user and user["subscription_until"] else "-",
             },
             "finance": {
                 "balance": round(float(balance), 2),

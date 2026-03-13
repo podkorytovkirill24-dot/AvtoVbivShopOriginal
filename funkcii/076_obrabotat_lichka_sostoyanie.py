@@ -22,22 +22,11 @@ async def handle_private_state(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         allow_repeat = get_config_bool(conn, "allow_repeat", True)
         limit_per_day = get_config_int(conn, "limit_per_day", 0)
-        require_sub = get_config_bool(conn, "require_subscription", False)
         if get_config_bool(conn, "stop_work"):
             conn.close()
-            await update.message.reply_text("Приемка на паузе. Попробуйте позже.")
+            await update.message.reply_text("⛔ STOP-WORK\nПриемка временно на паузе. Попробуйте позже.")
             clear_state(context)
             return
-        if require_sub:
-            sub_until = conn.execute(
-                "SELECT subscription_until FROM users WHERE user_id = ?",
-                (update.effective_user.id,),
-            ).fetchone()["subscription_until"]
-            if not sub_until or sub_until < now_ts():
-                conn.close()
-                await update.message.reply_text("Подписка не активна. Обратитесь к администратору.")
-                clear_state(context)
-                return
         if limit_per_day > 0:
             start_day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
             cnt = conn.execute(
@@ -60,6 +49,12 @@ async def handle_private_state(update: Update, context: ContextTypes.DEFAULT_TYP
             (reception_chat_id,),
         ).fetchone()["cnt"]
         created_at = now_ts()
+        if get_config_bool(conn, "i_am_here_on"):
+            conn.execute(
+                "UPDATE users SET iam_here_at = CASE WHEN iam_here_at > 0 THEN iam_here_at ELSE ? END, "
+                "iam_warned_at = 0 WHERE user_id = ?",
+                (created_at, update.effective_user.id),
+            )
         accepted = []
         for idx, phone in enumerate(numbers, start=1):
             if not allow_repeat:
@@ -284,33 +279,23 @@ async def handle_private_state(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Лимит обновлен.")
         return
 
-    if name == "admin_actuality":
+    if name == "admin_i_am_here":
         try:
             minutes = int(text)
         except ValueError:
             conn.close()
-            await update.message.reply_text("Введите число минут.")
             return
-        set_config(conn, "actualization_minutes", str(minutes))
-        set_config(conn, "actualization_on", "1" if minutes > 0 else "0")
+        set_config(conn, "i_am_here_minutes", str(minutes))
+        set_config(conn, "i_am_here_on", "1" if minutes > 0 else "0")
         conn.close()
         clear_state(context)
-        await update.message.reply_text("Актуальность обновлена.")
+        if minutes > 0:
+            await update.message.reply_text(f"Функция «Я тут» включена. Интервал: {minutes} мин.")
+        else:
+            await update.message.reply_text("Функция «Я тут» выключена.")
         return
 
-    if name == "admin_auto_success":
-        try:
-            minutes = int(text)
-        except ValueError:
-            conn.close()
-            await update.message.reply_text("Введите число минут.")
-            return
-        set_config(conn, "auto_success_minutes", str(minutes))
-        set_config(conn, "auto_success_on", "1" if minutes > 0 else "0")
-        conn.close()
-        clear_state(context)
-        await update.message.reply_text("Авто-встал обновлен.")
-        return
+
 
     if name == "admin_auto_slip":
         try:
@@ -323,21 +308,35 @@ async def handle_private_state(update: Update, context: ContextTypes.DEFAULT_TYP
         set_config(conn, "auto_slip_on", "1" if minutes > 0 else "0")
         conn.close()
         clear_state(context)
-        await update.message.reply_text("Авто-слёт обновлен.")
+        if minutes > 0:
+            await update.message.reply_text(f"Авто-слёт включен. Интервал: {minutes} мин.")
+        else:
+            await update.message.reply_text("Авто-слёт выключен.")
         return
 
-    if name == "admin_lunch":
-        parts = [p.strip() for p in text.split("-", 1)]
-        if len(parts) != 2:
+    if name == "admin_lunch_text":
+        if not text:
             conn.close()
-            await update.message.reply_text("Формат: HH:MM-HH:MM")
             return
-        set_config(conn, "lunch_start", parts[0])
-        set_config(conn, "lunch_end", parts[1])
-        set_config(conn, "lunch_on", "1")
+        set_config(conn, "lunch_text", text)
+        lunch_on = get_config_bool(conn, "lunch_on")
         conn.close()
         clear_state(context)
-        await update.message.reply_text("Расписание обедов обновлено.")
+        status = "ВКЛ" if lunch_on else "ВЫКЛ"
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✏ Редактировать текст", callback_data="adm:lunch:edit")],
+                [
+                    InlineKeyboardButton("✅ Включить", callback_data="adm:lunch:on"),
+                    InlineKeyboardButton("⛔ Выключить", callback_data="adm:lunch:off"),
+                ],
+                [InlineKeyboardButton("⬅ Назад", callback_data="adm:settings")],
+            ]
+        )
+        await update.message.reply_text(
+            f"🍽 Расписание обедов\nСтатус: {status}\n\n{text}",
+            reply_markup=keyboard,
+        )
         return
 
     if name == "admin_add_admin":
@@ -513,74 +512,55 @@ async def handle_private_state(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Запрос на вывод отправлен.")
         return
 
-    if name == "admin_payout":
-        parts = [p.strip() for p in text.split("|")]
-        if len(parts) < 2:
-            conn.close()
-            await update.message.reply_text("Формат: юз(@username)/id | сумма | примечание(необязательно)")
-            return
-        user_id = resolve_user_id_input(conn, parts[0])
+    if name == "admin_payout_user":
+        user_id = resolve_user_id_input(conn, text)
         if user_id is None:
             conn.close()
-            await update.message.reply_text("Первое поле: укажите ЮЗ (@username) или ID.")
+            await update.message.reply_text("Пользователь не найден. Введите @username или ID.")
+            return
+        row = conn.execute("SELECT username FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        label = format_user_label(user_id, row["username"] if row else None)
+        set_state(context, "admin_payout_amount", user_id=user_id)
+        conn.close()
+        await update.message.reply_text(f"Введите сумму выплаты для {label}:")
+        return
+
+    if name == "admin_payout_amount":
+        user_id = state["data"].get("user_id")
+        if not user_id:
+            conn.close()
+            clear_state(context)
+            await update.message.reply_text("Не найден пользователь. Начните заново.")
             return
         try:
-            amount = float(parts[1].replace(",", "."))
+            amount = float(text.replace(",", "."))
         except ValueError:
             conn.close()
-            await update.message.reply_text("Неверный формат.")
+            await update.message.reply_text("Введите сумму числом (например 110 или 110.5).")
             return
-        note = parts[2] if len(parts) > 2 else ""
+        if amount <= 0:
+            conn.close()
+            await update.message.reply_text("Сумма должна быть больше нуля.")
+            return
+        row = conn.execute("SELECT username FROM users WHERE user_id = ?", (user_id,)).fetchone()
         conn.execute(
             "INSERT INTO payouts (user_id, amount, note, created_at) VALUES (?, ?, ?, ?)",
-            (user_id, amount, note, now_ts()),
+            (user_id, amount, "", now_ts()),
         )
         conn.commit()
         conn.close()
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"💸 Вам начислили ВП: ${amount:.2f}",
+                text=f"💸 Вам начислена выплата: ${amount:.2f}",
             )
         except Exception:
             pass
         clear_state(context)
-        await update.message.reply_text("Выплата добавлена.")
+        label = format_user_label(user_id, row["username"] if row else None)
+        await update.message.reply_text(f"Выплата отправлена: {label} на ${amount:.2f}.")
         return
 
-    if name == "admin_user_subscription":
-        parts = [p.strip() for p in text.split("|")]
-        if len(parts) < 2:
-            conn.close()
-            await update.message.reply_text("Формат: юз(@username)/id | дней")
-            return
-        user_id = resolve_user_id_input(conn, parts[0])
-        if user_id is None:
-            conn.close()
-            await update.message.reply_text("Первое поле: укажите ЮЗ (@username) или ID.")
-            return
-        try:
-            days = int(parts[1])
-        except ValueError:
-            conn.close()
-            await update.message.reply_text("Неверный формат.")
-            return
-        until = now_ts() + days * 86400
-        conn.execute(
-            "UPDATE users SET subscription_until = ? WHERE user_id = ?",
-            (until, user_id),
-        )
-        conn.commit()
-        conn.close()
-        log_admin_action(
-            update.effective_user.id,
-            update.effective_user.username,
-            "grant_subscription",
-            f"target_id={user_id}|days={days}|until={format_ts(until)}",
-        )
-        clear_state(context)
-        await update.message.reply_text("Подписка обновлена.")
-        return
 
     if name == "mainmenu_text":
         set_config(conn, "main_menu_text", text)
@@ -620,7 +600,7 @@ async def handle_private_state(update: Update, context: ContextTypes.DEFAULT_TYP
         start_ts = int(dt.timestamp())
         end_ts = int((dt + timedelta(days=1)).timestamp())
         rows = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM queue_numbers WHERE created_at BETWEEN ? AND ?",
+            "SELECT COUNT(*) AS cnt FROM queue_numbers WHERE completed_at BETWEEN ? AND ? AND status IN ('success','slip','error','canceled')",
             (start_ts, end_ts),
         ).fetchone()
         success = conn.execute(
@@ -651,7 +631,7 @@ async def handle_private_state(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("Введите корректный ЮЗ (@username) или ID.")
             return
         user = conn.execute(
-            "SELECT user_id, username, last_seen, subscription_until, is_approved FROM users WHERE user_id = ?",
+            "SELECT user_id, username, last_seen, is_approved FROM users WHERE user_id = ?",
             (user_id,),
         ).fetchone()
         conn.close()
@@ -659,11 +639,9 @@ async def handle_private_state(update: Update, context: ContextTypes.DEFAULT_TYP
         if not user:
             await update.message.reply_text("Пользователь не найден.")
             return
-        sub_text = format_ts(user["subscription_until"]) if user["subscription_until"] else "-"
         await update.message.reply_text(
             f"{format_user_label(user['user_id'], user['username'])}\n"
             f"Активность: {format_ts(user['last_seen'])}\n"
-            f"Подписка: {sub_text}\n"
             f"Одобрен: {'да' if user['is_approved'] else 'нет'}"
         )
         return

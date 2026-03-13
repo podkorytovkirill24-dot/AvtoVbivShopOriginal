@@ -6,26 +6,10 @@ async def handle_private_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     conn = get_conn()
     upsert_user(conn, update.effective_user)
     conn.commit()
-    is_admin_user = is_admin(conn, update.effective_user.id)
 
     if not update.message.text:
         conn.close()
         return
-
-    if get_config_bool(conn, "block_pm") and not is_admin_user:
-        approved = conn.execute(
-            "SELECT is_approved FROM users WHERE user_id = ?",
-            (update.effective_user.id,),
-        ).fetchone()
-        if not approved or approved["is_approved"] == 0:
-            conn.close()
-            await update.message.reply_text(
-                "Личка закрыта. Нажмите кнопку ниже, чтобы оставить заявку.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("📝 Оставить заявку", callback_data="user:request_access")]]
-                ),
-            )
-            return
 
     text = (update.message.text or "").strip()
     submit = get_config(conn, "menu_btn_submit", DEFAULT_CONFIG["menu_btn_submit"])

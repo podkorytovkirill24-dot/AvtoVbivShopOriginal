@@ -28,6 +28,14 @@ async def handle_worker_code_reply(update: Update, context: ContextTypes.DEFAULT
     conn.close()
 
     phone_display = format_phone(row["phone"])
+    user_keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🔁 Повтор кода", callback_data=f"user:repeat:{row['id']}"),
+                InlineKeyboardButton("📱 Запрос QR", callback_data=f"user:qr:{row['id']}"),
+            ]
+        ]
+    )
     try:
         if photo_id:
             caption = f"Код для номера {phone_display}"
@@ -37,11 +45,13 @@ async def handle_worker_code_reply(update: Update, context: ContextTypes.DEFAULT
                 chat_id=row["user_id"],
                 photo=photo_id,
                 caption=caption,
+                reply_markup=user_keyboard,
             )
         elif code_text:
             await context.bot.send_message(
                 chat_id=row["user_id"],
                 text=f"Код для номера {phone_display}:\n{code_text}",
+                reply_markup=user_keyboard,
             )
     except Exception:
         pass

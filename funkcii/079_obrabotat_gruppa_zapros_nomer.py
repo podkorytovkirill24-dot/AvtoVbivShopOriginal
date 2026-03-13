@@ -16,37 +16,34 @@ async def handle_group_request_number(update: Update, context: ContextTypes.DEFA
         return
 
     thread_id = update.message.message_thread_id or 0
-    topic = conn.execute(
-        "SELECT reception_chat_id FROM processing_topics WHERE chat_id = ? AND thread_id = ?",
-        (update.effective_chat.id, thread_id),
-    ).fetchone()
-    if not topic:
-        reception = conn.execute(
-            "SELECT 1 FROM reception_groups WHERE chat_id = ? AND is_active = 1",
-            (update.effective_chat.id,),
+    issue_by = get_config_bool(conn, "issue_by_departments", False)
+    reception_chat_id = None
+
+    if issue_by:
+        topic = conn.execute(
+            "SELECT reception_chat_id FROM processing_topics WHERE chat_id = ? AND thread_id = ?",
+            (update.effective_chat.id, thread_id),
         ).fetchone()
-        conn.close()
-        if reception:
+        if not topic or not topic["reception_chat_id"]:
+            conn.close()
+            await update.message.reply_text("Привязка не настроена. Напишите /set.")
             return
-        await update.message.reply_text("Тема не привязана к приемке. Напишите /set.")
-        return
+        reception_chat_id = topic["reception_chat_id"]
+    else:
+        topic = conn.execute(
+            "SELECT reception_chat_id FROM processing_topics WHERE chat_id = ? AND thread_id = ?",
+            (update.effective_chat.id, thread_id),
+        ).fetchone()
+        if not topic:
+            reception = conn.execute(
+                "SELECT 1 FROM reception_groups WHERE chat_id = ? AND is_active = 1",
+                (update.effective_chat.id,),
+            ).fetchone()
+            conn.close()
+            if reception:
+                return
 
-    departments = conn.execute(
-        "SELECT id, name FROM departments ORDER BY id"
-    ).fetchall()
-    issue_by_dept = get_config_bool(conn, "issue_by_departments", False)
-    if issue_by_dept and len(departments) > 1:
-        keyboard = []
-        for d in departments:
-            keyboard.append(
-                [InlineKeyboardButton(d["name"], callback_data=f"issue:{d['id']}:{topic['reception_chat_id']}")]
-            )
-        conn.close()
-        await update.message.reply_text("Выберите отдел для выдачи:", reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-
-    dept_ids = [d["id"] for d in departments] if departments else []
-    row = fetch_next_queue(conn, dept_ids, topic["reception_chat_id"])
+    row = fetch_next_queue(conn, [], reception_chat_id)
     if not row:
         conn.close()
         await update.message.reply_text("Очередь пуста.")

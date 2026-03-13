@@ -1,8 +1,6 @@
 async def send_number_to_worker(update: Update, context: ContextTypes.DEFAULT_TYPE, row: sqlite3.Row) -> None:
     conn = get_conn()
     notify_taken = get_config_bool(conn, "notify_taken")
-    repeat_code = get_config_bool(conn, "repeat_code")
-    qr_request = get_config_bool(conn, "qr_request")
     reception_title = None
     reception_chat_id = row["reception_chat_id"] if "reception_chat_id" in row.keys() else None
     if reception_chat_id:
@@ -30,10 +28,6 @@ async def send_number_to_worker(update: Update, context: ContextTypes.DEFAULT_TY
         [InlineKeyboardButton("✉ Сообщение владельцу", callback_data=f"q:msg:{row['id']}")],
         [InlineKeyboardButton("⏭ Скип", callback_data=f"q:skip:{row['id']}")],
     ]
-    if qr_request:
-        buttons.append([InlineKeyboardButton("Запросить QR", callback_data=f"q:qr:{row['id']}")])
-    if repeat_code:
-        buttons.append([InlineKeyboardButton("Повтор кода", callback_data=f"q:repeat:{row['id']}")])
     keyboard = InlineKeyboardMarkup(buttons)
 
     msg_src = update.message or (update.callback_query.message if update.callback_query else None)
@@ -62,8 +56,8 @@ async def send_number_to_worker(update: Update, context: ContextTypes.DEFAULT_TY
         sent_ok = True
         conn = get_conn()
         conn.execute(
-            "UPDATE queue_numbers SET worker_chat_id = ?, worker_msg_id = ? WHERE id = ?",
-            (msg.chat_id, msg.message_id, row["id"]),
+            "UPDATE queue_numbers SET worker_chat_id = ?, worker_msg_id = ?, worker_thread_id = ? WHERE id = ?",
+            (msg.chat_id, msg.message_id, thread_id or 0, row["id"]),
         )
         conn.commit()
         conn.close()

@@ -1,3 +1,41 @@
+def _short_title(text: str, limit: int = 26) -> str:
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _build_issue_by_departments_menu(conn: sqlite3.Connection) -> Tuple[str, InlineKeyboardMarkup]:
+    current = get_config_bool(conn, "issue_by_departments", False)
+    rows = conn.execute(
+        "SELECT p.chat_id, p.thread_id, p.chat_title, "
+        "r.chat_title AS reception_title, t.name AS tariff_name "
+        "FROM processing_topics p "
+        "LEFT JOIN reception_groups r ON p.reception_chat_id = r.chat_id "
+        "LEFT JOIN tariffs t ON r.tariff_id = t.id "
+        "ORDER BY p.chat_id, p.thread_id"
+    ).fetchall()
+    status = "ВКЛ" if current else "ВЫКЛ"
+    lines = ["🗂 Выдача по отделам", f"Статус: {status}", ""]
+    keyboard: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("🔁 Включить/выключить", callback_data="adm:issue_by_departments:toggle")]
+    ]
+    if not rows:
+        lines.append("Привязок /set нет.")
+        lines.append("Сначала сделайте /set в нужной группе/теме.")
+    else:
+        for r in rows:
+            title = r["chat_title"] or str(r["chat_id"])
+            topic = f"тема {r['thread_id']}" if r["thread_id"] else "без темы"
+            target = r["tariff_name"] or r["reception_title"] or "не назначено"
+            lines.append(f"• {title} ({topic}) → {target}")
+            keyboard.append(
+                [InlineKeyboardButton(f"Настроить { _short_title(title) }", callback_data=f"adm:issue_by_departments:topic:{r['chat_id']}:{r['thread_id']}")]
+            )
+    keyboard.append([InlineKeyboardButton("⬅ Назад", callback_data="adm:settings")])
+    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
@@ -203,6 +241,65 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer()
         return
 
+    if data.startswith("user:repeat:") or data.startswith("user:qr:"):
+        action = parts[1]
+        queue_id = int(parts[2])
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT user_id, phone, worker_chat_id, worker_thread_id FROM queue_numbers WHERE id = ?",
+            (queue_id,),
+        ).fetchone()
+        conn.close()
+        if not row or row["user_id"] != query.from_user.id:
+            await query.answer("Нет доступа", show_alert=True)
+            return
+        if not row["worker_chat_id"]:
+            await query.answer("Оператор еще не назначен", show_alert=True)
+            return
+        phone_display = format_phone(row["phone"])
+        action_label = "Повтор кода" if action == "repeat" else "Запрос QR"
+        notify_text = (
+            f"🔔 {action_label} от {format_user_label(query.from_user.id, query.from_user.username)}\n"
+            f"Номер: {phone_display}"
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=row["worker_chat_id"],
+                message_thread_id=row["worker_thread_id"] or None,
+                text=notify_text,
+            )
+        except Exception:
+            pass
+        await query.answer("Запрос отправлен")
+        return
+
+    if data == "user:i_am_here":
+        conn = get_conn()
+        conn.execute(
+            "UPDATE users SET iam_here_at = ?, iam_warned_at = 0 WHERE user_id = ?",
+            (now_ts(), query.from_user.id),
+        )
+        conn.commit()
+        conn.close()
+        await query.answer("Отметка принята")
+        return
+
+    if data == "user:lunch":
+        conn = get_conn()
+        text = get_config(conn, "lunch_text", "").strip()
+        conn.close()
+        if not text:
+            text = "Расписание обедов пока не настроено."
+        await send_or_update(
+            context,
+            query.from_user.id,
+            f"🍽 Расписание обедов\n\n{text}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Назад", callback_data="user:home")]]),
+            message=query.message,
+        )
+        await query.answer()
+        return
+
     if data == "adm:tariff:edit":
         conn = get_conn()
         tariffs = conn.execute("SELECT id, name FROM tariffs ORDER BY id").fetchall()
@@ -264,36 +361,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer()
         return
 
-    if data == "adm:dept:add":
-        set_state(context, "admin_department_add")
-        await query.edit_message_text("Введите название приемки:")
-        await query.answer()
-        return
-
-    if data == "adm:dept:edit":
+    if data.startswith("adm:reception:delete:"):
+        chat_id = int(parts[3])
         conn = get_conn()
-        depts = conn.execute("SELECT id, name FROM departments ORDER BY id").fetchall()
+        conn.execute("DELETE FROM reception_groups WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+        text, keyboard = build_departments_menu(conn)
         conn.close()
-        if not depts:
-            await query.answer("Нет приемок", show_alert=True)
-            return
-        keyboard = [[InlineKeyboardButton(f"{d['id']} {d['name']}", callback_data=f"adm:dept:edit:{d['id']}")] for d in depts]
-        keyboard.append([InlineKeyboardButton("⬅ Назад", callback_data="adm:departments")])
-        await query.edit_message_text("Выберите приемку:", reply_markup=InlineKeyboardMarkup(keyboard))
-        await query.answer()
-        return
-
-    if data.startswith("adm:dept:edit:"):
-        dept_id = int(parts[3])
-        set_state(context, "admin_department_edit", department_id=dept_id)
-        await query.edit_message_text("Введите новое название приемки:")
-        await query.answer()
-        return
-
-    if data == "adm:dept:delete":
-        set_state(context, "admin_department_delete")
-        await query.edit_message_text("Введите ID приемки для удаления:")
-        await query.answer()
+        await query.edit_message_text(text, reply_markup=keyboard)
+        await query.answer("Удалено")
         return
 
     if data == "adm:offices":
@@ -304,73 +380,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer()
         return
 
-    if data == "adm:office:add":
-        set_state(context, "admin_office_add")
-        await query.edit_message_text("Введите название офиса:")
-        await query.answer()
-        return
-
-    if data == "adm:office:edit":
+    if data.startswith("adm:topic:delete:"):
+        chat_id = int(parts[3])
+        thread_id = int(parts[4])
         conn = get_conn()
-        offices = conn.execute("SELECT id, name FROM offices ORDER BY id").fetchall()
-        conn.close()
-        if not offices:
-            await query.answer("Нет офисов", show_alert=True)
-            return
-        keyboard = [[InlineKeyboardButton(f"{o['id']} {o['name']}", callback_data=f"adm:office:edit:{o['id']}")] for o in offices]
-        keyboard.append([InlineKeyboardButton("⬅ Назад", callback_data="adm:offices")])
-        await query.edit_message_text("Выберите офис:", reply_markup=InlineKeyboardMarkup(keyboard))
-        await query.answer()
-        return
-
-    if data.startswith("adm:office:edit:"):
-        office_id = int(parts[3])
-        set_state(context, "admin_office_edit", office_id=office_id)
-        await query.edit_message_text("Введите новое название офиса:")
-        await query.answer()
-        return
-
-    if data == "adm:office:delete":
-        set_state(context, "admin_office_delete")
-        await query.edit_message_text("Введите ID офиса для удаления:")
-        await query.answer()
-        return
-
-    if data == "adm:office:bind":
-        await query.edit_message_text("Чтобы привязать офис, напишите /set в нужной группе/теме.")
-        await query.answer()
-        return
-
-    if data.startswith("office_bind:"):
-        office_id = int(parts[1])
-        chat_id = int(parts[2])
-        thread_id = int(parts[3])
-        conn = get_conn()
-        if not (is_admin(conn, query.from_user.id) or await is_chat_admin(chat_id, query.from_user.id, context)):
-            conn.close()
-            await query.answer(ui("no_access"), show_alert=True)
-            return
         conn.execute(
-            "UPDATE offices SET chat_id = ?, thread_id = ? WHERE id = ?",
-            (chat_id, thread_id if thread_id > 0 else None, office_id),
+            "DELETE FROM processing_topics WHERE chat_id = ? AND thread_id = ?",
+            (chat_id, thread_id),
         )
         conn.commit()
+        text, keyboard = build_offices_menu(conn)
         conn.close()
-        await query.edit_message_text("✅ Офис привязан к этой группе.")
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                message_thread_id=thread_id if thread_id > 0 else None,
-                text="📥 Рабочая панель\n"
-                "Чтобы получить номер, нажмите кнопку «Взять номер».\n\n"
-                f"{WORKER_RULES_TEXT}",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("📥 Взять номер", callback_data="topic:next")]]
-                ),
-            )
-        except Exception:
-            pass
-        await query.answer("Готово")
+        await query.edit_message_text(text, reply_markup=keyboard)
+        await query.answer("Удалено")
         return
 
     if data.startswith("set_topic:"):
@@ -382,11 +404,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             conn.close()
             await query.answer(ui("no_access"), show_alert=True)
             return
+        chat_title = query.message.chat.title if query.message else None
         conn.execute(
-            "INSERT INTO processing_topics (chat_id, thread_id, reception_chat_id) "
-            "VALUES (?, ?, ?) "
-            "ON CONFLICT(chat_id, thread_id) DO UPDATE SET reception_chat_id = excluded.reception_chat_id",
-            (chat_id, thread_id, reception_chat_id),
+            "INSERT INTO processing_topics (chat_id, thread_id, reception_chat_id, chat_title) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(chat_id, thread_id) DO UPDATE SET "
+            "reception_chat_id = excluded.reception_chat_id, "
+            "chat_title = excluded.chat_title",
+            (chat_id, thread_id, reception_chat_id, chat_title),
         )
         conn.commit()
         conn.close()
@@ -627,7 +652,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         keyboard = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("🔎 Поиск по ЮЗ/ID", callback_data="adm:user:search")],
-                [InlineKeyboardButton("🔗 Выдать подписку", callback_data="adm:user:sub")],
                 [InlineKeyboardButton("⬅ Назад", callback_data="adm:panel")],
             ]
         )
@@ -641,12 +665,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer()
         return
 
-    if data == "adm:user:sub":
-        set_state(context, "admin_user_subscription")
-        await query.edit_message_text("Формат: юз(@username)/id | дней")
-        await query.answer()
-        return
-
     if data == "adm:queue":
         conn = get_conn()
         queued = conn.execute("SELECT COUNT(*) AS cnt FROM queue_numbers WHERE status = 'queued'").fetchone()["cnt"]
@@ -654,225 +672,167 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         conn.close()
         keyboard = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("🧹 Очистить очередь", callback_data="adm:queue:clear")],
-                [InlineKeyboardButton("⬅ Назад", callback_data="adm:panel")],
+                [InlineKeyboardButton("?? ???????? ???????", callback_data="adm:queue:clear")],
+                [InlineKeyboardButton("? ?????", callback_data="adm:panel")],
             ]
         )
         await query.edit_message_text(
-            f"🧹 Очередь\nВ ожидании: {queued}\nВ работе: {taken}",
+            f"""?? ???????
+? ????????: {queued}
+? ??????: {taken}""",
             reply_markup=keyboard,
         )
         await query.answer()
         return
 
-    if data == "adm:queue:clear":
-        conn = get_conn()
-        conn.execute(
-            "UPDATE queue_numbers SET status = 'canceled', completed_at = ? WHERE status = 'queued'",
-            (now_ts(),),
-        )
-        conn.commit()
-        conn.close()
-        log_admin_action(query.from_user.id, query.from_user.username, "queue_clear", "status=queued->canceled")
-        await query.edit_message_text("✅ Очередь очищена.", reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅ Назад", callback_data="adm:queue")]]
-        ))
-        await query.answer("Готово")
-        return
-
-    if data == "adm:search":
-        set_state(context, "admin_search_number")
-        await query.edit_message_text("Введите номер для поиска:")
-        await query.answer()
-        return
-
-    if data == "adm:withdrawals":
-        conn = get_conn()
-        rows = conn.execute(
-            "SELECT w.id, w.user_id, u.username, w.amount, w.status "
-            "FROM withdrawal_requests w "
-            "LEFT JOIN users u ON u.user_id = w.user_id "
-            "ORDER BY w.created_at DESC LIMIT 10"
-        ).fetchall()
-        conn.close()
-        if not rows:
-            await query.edit_message_text(ui("empty_withdrawals"), reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅ Назад", callback_data="adm:panel")]]
-            ))
-            await query.answer()
-            return
-        lines = ["💰 Запросы вывода:"]
-        keyboard = []
-        for r in rows:
-            lines.append(
-                f"#{r['id']} | {format_user_label(r['user_id'], r['username'])} | "
-                f"${r['amount']} | {status_human(r['status'])}"
-            )
-            if r["status"] == "pending":
-                keyboard.append(
-                    [InlineKeyboardButton(f"✅ Оплачено #{r['id']}", callback_data=f"adm:withdraw:pay:{r['id']}")]
-                )
-                keyboard.append(
-                    [InlineKeyboardButton(f"❌ Ошибка #{r['id']}", callback_data=f"adm:withdraw:error:{r['id']}")]
-                )
-        keyboard.append([InlineKeyboardButton("⬅ Назад", callback_data="adm:panel")])
-        await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
-        await query.answer()
-        return
-
-    if data.startswith("adm:withdraw:pay:"):
-        req_id = int(parts[3])
-        conn = get_conn()
-        req = conn.execute(
-            "SELECT user_id, amount FROM withdrawal_requests WHERE id = ?",
-            (req_id,),
-        ).fetchone()
-        conn.execute(
-            "UPDATE withdrawal_requests SET status = 'paid', updated_at = ? WHERE id = ? AND status = 'pending'",
-            (now_ts(), req_id),
-        )
-        conn.commit()
-        conn.close()
-        log_admin_action(query.from_user.id, query.from_user.username, "mark_withdraw_paid", f"request_id={req_id}")
-        if req:
-            try:
-                await context.bot.send_message(
-                    chat_id=req["user_id"],
-                    text=f"✅ Ваш запрос вывода #{req_id} на ${float(req['amount']):.2f} отмечен как оплаченный.",
-                )
-            except Exception:
-                pass
-        await query.edit_message_text("Выплата отмечена.", reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅ Назад", callback_data="adm:withdrawals")]]
-        ))
-        await query.answer("Готово")
-        return
-
-    if data.startswith("adm:withdraw:error:") or data.startswith("adm:withdraw:cancel:"):
-        req_id = int(parts[3])
-        conn = get_conn()
-        req = conn.execute(
-            "SELECT user_id, amount FROM withdrawal_requests WHERE id = ?",
-            (req_id,),
-        ).fetchone()
-        conn.execute(
-            "UPDATE withdrawal_requests SET status = 'error', updated_at = ? WHERE id = ? AND status = 'pending'",
-            (now_ts(), req_id),
-        )
-        conn.commit()
-        conn.close()
-        log_admin_action(query.from_user.id, query.from_user.username, "error_withdraw_request", f"request_id={req_id}")
-        if req:
-            try:
-                await context.bot.send_message(
-                    chat_id=req["user_id"],
-                    text=f"❌ По вашему запросу вывода #{req_id} возникла ошибка. Сумма ${float(req['amount']):.2f} не списана.",
-                )
-            except Exception:
-                pass
-        await query.edit_message_text("Отмечено как ошибка (деньги не списаны).", reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅ Назад", callback_data="adm:withdrawals")]]
-        ))
-        await query.answer("Готово")
-        return
-
     if data == "adm:payouts":
-        set_state(context, "admin_payout")
-        await query.edit_message_text("Формат: юз(@username)/id | сумма | примечание(необязательно)")
-        await query.answer()
-        return
-
-    if data == "adm:broadcast":
-        set_state(context, "admin_broadcast")
-        await query.edit_message_text("Отправьте сообщение для рассылки (текст или фото).")
-        await query.answer()
-        return
-
-    if data == "adm:admins":
         conn = get_conn()
-        rows = conn.execute(
-            "SELECT a.user_id, u.username "
-            "FROM admins a LEFT JOIN users u ON u.user_id = a.user_id "
-            "ORDER BY a.user_id"
-        ).fetchall()
+        if not is_admin(conn, query.from_user.id):
+            conn.close()
+            await query.answer(ui("no_access"), show_alert=True)
+            return
         conn.close()
-        lines = ["🛡 Админы:"]
-        for r in rows:
-            lines.append(f"• {format_user_label(r['user_id'], r['username'])}")
-        keyboard = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("➕ Добавить", callback_data="adm:admins:add")],
-                [InlineKeyboardButton("➖ Удалить", callback_data="adm:admins:remove")],
-                [InlineKeyboardButton("⬅ Назад", callback_data="adm:panel")],
-            ]
-        )
-        await query.edit_message_text("\n".join(lines), reply_markup=keyboard)
-        await query.answer()
-        return
-
-    if data == "adm:admins:add":
-        set_state(context, "admin_add_admin")
-        await query.edit_message_text("Введите ЮЗ (@username) или ID пользователя:")
-        await query.answer()
-        return
-
-    if data == "adm:admins:remove":
-        set_state(context, "admin_remove_admin")
-        await query.edit_message_text("Введите ЮЗ (@username) или ID пользователя для удаления:")
-        await query.answer()
-        return
-
-    if data == "adm:subscription":
-        conn = get_conn()
-        current = get_config_bool(conn, "require_subscription", False)
-        set_config(conn, "require_subscription", "0" if current else "1")
-        conn.close()
-        log_admin_action(
-            query.from_user.id,
-            query.from_user.username,
-            "toggle_subscription_required",
-            f"require_subscription={'0' if current else '1'}",
-        )
+        set_state(context, "admin_payout_user")
         await query.edit_message_text(
-            f"ОП (подписка): {'ВКЛ' if not current else 'ВЫКЛ'}",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅ Назад", callback_data="adm:settings")]]
-            ),
+            "Введите @username или ID пользователя для выплаты:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Назад", callback_data="adm:panel")]]),
         )
-        await query.answer("Обновлено")
-        return
-
-    if data == "adm:limit":
-        set_state(context, "admin_limit")
-        await query.edit_message_text("Введите лимит сдачи в день (0 = без лимита):")
-        await query.answer()
-        return
-
-    if data == "adm:actuality":
-        set_state(context, "admin_actuality")
-        await query.edit_message_text("Введите актуальность в минутах (0 = выкл):")
-        await query.answer()
-        return
-
-    if data == "adm:auto_success":
-        set_state(context, "admin_auto_success")
-        await query.edit_message_text("Введите минуты для авто-встал (0 = выкл):")
-        await query.answer()
-        return
-
-    if data == "adm:auto_slip":
-        set_state(context, "admin_auto_slip")
-        await query.edit_message_text("Введите минуты для авто-слет (0 = выкл):")
         await query.answer()
         return
 
     if data == "adm:lunch":
-        set_state(context, "admin_lunch")
-        await query.edit_message_text("Введите время обеда: HH:MM-HH:MM")
+        conn = get_conn()
+        lunch_text = get_config(conn, "lunch_text", "").strip()
+        lunch_on = get_config_bool(conn, "lunch_on")
+        conn.close()
+        if not lunch_text:
+            set_state(context, "admin_lunch_text")
+            await query.edit_message_text(
+                "Введите текст для расписания обедов (время или любой текст):",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Назад", callback_data="adm:settings")]]),
+            )
+            await query.answer()
+            return
+        status = "ВКЛ" if lunch_on else "ВЫКЛ"
+        body = lunch_text or "Расписание пока не задано."
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✏ Редактировать текст", callback_data="adm:lunch:edit")],
+                [
+                    InlineKeyboardButton("✅ Включить", callback_data="adm:lunch:on"),
+                    InlineKeyboardButton("⛔ Выключить", callback_data="adm:lunch:off"),
+                ],
+                [InlineKeyboardButton("⬅ Назад", callback_data="adm:settings")],
+            ]
+        )
+        await query.edit_message_text(
+            f"🍽 Расписание обедов\nСтатус: {status}\n\n{body}",
+            reply_markup=keyboard,
+        )
         await query.answer()
         return
 
+    if data == "adm:lunch:edit":
+        set_state(context, "admin_lunch_text")
+        await query.edit_message_text("Введите новый текст для расписания обедов:")
+        await query.answer()
+        return
+
+    if data == "adm:lunch:on" or data == "adm:lunch:off":
+        conn = get_conn()
+        set_config(conn, "lunch_on", "1" if data.endswith(":on") else "0")
+        lunch_text = get_config(conn, "lunch_text", "").strip()
+        lunch_on = get_config_bool(conn, "lunch_on")
+        conn.close()
+        status = "ВКЛ" if lunch_on else "ВЫКЛ"
+        body = lunch_text or "Расписание пока не задано."
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✏ Редактировать текст", callback_data="adm:lunch:edit")],
+                [
+                    InlineKeyboardButton("✅ Включить", callback_data="adm:lunch:on"),
+                    InlineKeyboardButton("⛔ Выключить", callback_data="adm:lunch:off"),
+                ],
+                [InlineKeyboardButton("⬅ Назад", callback_data="adm:settings")],
+            ]
+        )
+        await query.edit_message_text(
+            f"🍽 Расписание обедов\nСтатус: {status}\n\n{body}",
+            reply_markup=keyboard,
+        )
+        await query.answer("Обновлено")
+        return
+
+    if data == "adm:issue_by_departments":
+        conn = get_conn()
+        text, keyboard = _build_issue_by_departments_menu(conn)
+        conn.close()
+        await query.edit_message_text(text, reply_markup=keyboard)
+        await query.answer()
+        return
+
+    if data == "adm:issue_by_departments:toggle":
+        conn = get_conn()
+        current = get_config_bool(conn, "issue_by_departments", False)
+        set_config(conn, "issue_by_departments", "0" if current else "1")
+        text, keyboard = _build_issue_by_departments_menu(conn)
+        conn.close()
+        await query.edit_message_text(text, reply_markup=keyboard)
+        await query.answer("?????????")
+        return
+
+    if data.startswith("adm:issue_by_departments:topic:"):
+        chat_id = int(parts[3])
+        thread_id = int(parts[4])
+        conn = get_conn()
+        tariffs = conn.execute(
+            "SELECT id, name, price, duration_min FROM tariffs ORDER BY id"
+        ).fetchall()
+        conn.close()
+        if not tariffs:
+            await query.answer("??? ???????", show_alert=True)
+            return
+        keyboard = []
+        for t in tariffs:
+            label = f"{t['name']} | {t['duration_min']} ??? | ${t['price']}"
+            keyboard.append(
+                [InlineKeyboardButton(label, callback_data=f"adm:issue_by_departments:set:{chat_id}:{thread_id}:{t['id']}")]
+            )
+        keyboard.append([InlineKeyboardButton("? ?????", callback_data="adm:issue_by_departments")])
+        await query.edit_message_text("???????? ????? ??? ???? ????????:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.answer()
+        return
+
+    if data.startswith("adm:issue_by_departments:set:"):
+        chat_id = int(parts[3])
+        thread_id = int(parts[4])
+        tariff_id = int(parts[5])
+        conn = get_conn()
+        rec = conn.execute(
+            "SELECT chat_id FROM reception_groups WHERE tariff_id = ? AND is_active = 1 ORDER BY chat_title LIMIT 1",
+            (tariff_id,),
+        ).fetchone()
+        if not rec:
+            conn.close()
+            await query.answer("??? ?????? ??? ??????? (/num)", show_alert=True)
+            return
+        updated = conn.execute(
+            "UPDATE processing_topics SET reception_chat_id = ? WHERE chat_id = ? AND thread_id = ?",
+            (rec["chat_id"], chat_id, thread_id),
+        ).rowcount
+        conn.commit()
+        text, keyboard = _build_issue_by_departments_menu(conn)
+        conn.close()
+        if not updated:
+            await query.answer("??????? ???????? /set", show_alert=True)
+            return
+        await query.edit_message_text(text, reply_markup=keyboard)
+        await query.answer("?????????")
+        return
+
     if data == "adm:requests":
+
+
         conn = get_conn()
         rows = conn.execute(
             "SELECT r.id, r.user_id, u.username, r.status "
@@ -985,15 +945,33 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer("Готово")
         return
 
+    if data == "adm:auto_slip":
+        conn = get_conn()
+        minutes = get_config_int(conn, "auto_slip_minutes", 15)
+        enabled = get_config_bool(conn, "auto_slip_on")
+        conn.close()
+        status = "ВКЛ" if enabled else "ВЫКЛ"
+        set_state(context, "admin_auto_slip")
+        await query.edit_message_text(
+            f"🔁 Авто-слёт\nСтатус: {status}\nТекущий интервал: {minutes} мин\n\n"
+            "Введите новый интервал в минутах (0 = выключить):",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Назад", callback_data="adm:settings")]]),
+        )
+        await query.answer()
+        return
+
     if data == "adm:i_am_here":
         conn = get_conn()
-        conn.execute(
-            "UPDATE users SET last_seen = ? WHERE user_id = ?",
-            (now_ts(), query.from_user.id),
-        )
-        conn.commit()
+        minutes = get_config_int(conn, "i_am_here_minutes", 10)
+        enabled = get_config_bool(conn, "i_am_here_on")
         conn.close()
-        await query.answer("Вы отмечены как активный")
+        status = "ВКЛ" if enabled else "ВЫКЛ"
+        set_state(context, "admin_i_am_here")
+        await query.edit_message_text(
+            f"👋 Я тут\nСтатус: {status}\nТекущий интервал: {minutes} мин\n\n"
+            "Введите новый интервал в минутах (0 = выключить):"
+        )
+        await query.answer()
         return
 
     if data == "adm:input_type":
@@ -1399,7 +1377,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data == "topic:next" or data.startswith("office:next:"):
         if not query.message:
-            await query.answer("Нет данных", show_alert=True)
+            await query.answer("??? ??????", show_alert=True)
             return
         conn = get_conn()
         thread_id = query.message.message_thread_id or 0
@@ -1407,34 +1385,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "SELECT reception_chat_id FROM processing_topics WHERE chat_id = ? AND thread_id = ?",
             (query.message.chat_id, thread_id),
         ).fetchone()
-        if not topic:
-            conn.close()
-            await query.answer("Тема не привязана. Напишите /set", show_alert=True)
-            return
         if is_lunch_time(conn):
             conn.close()
-            await query.answer("Сейчас обед", show_alert=True)
+            await query.answer("?????? ????", show_alert=True)
             return
-        departments = conn.execute(
-            "SELECT id, name FROM departments ORDER BY id"
-        ).fetchall()
-        issue_by_dept = get_config_bool(conn, "issue_by_departments", False)
-        if issue_by_dept and len(departments) > 1:
-            keyboard = []
-            for d in departments:
-                keyboard.append(
-                    [InlineKeyboardButton(d["name"], callback_data=f"issue:{d['id']}:{topic['reception_chat_id']}")]
-                )
-            conn.close()
-            await query.message.reply_text("Выберите отдел для выдачи:", reply_markup=InlineKeyboardMarkup(keyboard))
-            await query.answer()
-            return
+        issue_by = get_config_bool(conn, "issue_by_departments", False)
+        reception_chat_id = None
+        if issue_by:
+            if not topic or not topic["reception_chat_id"]:
+                conn.close()
+                await query.answer("???????? ?? ?????????. ???????? /set", show_alert=True)
+                return
+            reception_chat_id = topic["reception_chat_id"]
+        else:
+            if not topic:
+                conn.close()
+                await query.answer("???? ?? ?????????. ???????? /set", show_alert=True)
+                return
 
-        dept_ids = [d["id"] for d in departments] if departments else []
-        row = fetch_next_queue(conn, dept_ids, topic["reception_chat_id"])
+        row = fetch_next_queue(conn, [], reception_chat_id)
         if not row:
             conn.close()
-            await query.answer("Очередь пуста", show_alert=True)
+            await query.answer("??????? ?????", show_alert=True)
             return
         conn.execute(
             "UPDATE queue_numbers SET status = 'taken', assigned_at = ?, worker_id = ? WHERE id = ?",
@@ -1443,5 +1415,5 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         conn.commit()
         conn.close()
         await send_number_to_worker(update, context, row)
-        await query.answer("Выдано")
+        await query.answer("??????")
         return

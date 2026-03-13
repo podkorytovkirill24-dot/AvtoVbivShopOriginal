@@ -8,6 +8,8 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     _add_column(conn, "users", "subscription_until", "subscription_until INTEGER DEFAULT 0")
     _add_column(conn, "users", "created_at", "created_at INTEGER")
     _add_column(conn, "users", "last_seen", "last_seen INTEGER")
+    _add_column(conn, "users", "iam_here_at", "iam_here_at INTEGER DEFAULT 0")
+    _add_column(conn, "users", "iam_warned_at", "iam_warned_at INTEGER DEFAULT 0")
 
     # Tariffs
     _add_column(conn, "tariffs", "price", "price REAL DEFAULT 0")
@@ -30,6 +32,7 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     _add_column(conn, "queue_numbers", "worker_id", "worker_id INTEGER")
     _add_column(conn, "queue_numbers", "worker_chat_id", "worker_chat_id INTEGER")
     _add_column(conn, "queue_numbers", "worker_msg_id", "worker_msg_id INTEGER")
+    _add_column(conn, "queue_numbers", "worker_thread_id", "worker_thread_id INTEGER")
     _add_column(conn, "queue_numbers", "tariff_id", "tariff_id INTEGER")
     _add_column(conn, "queue_numbers", "department_id", "department_id INTEGER")
     _add_column(conn, "queue_numbers", "photo_file_id", "photo_file_id TEXT")
@@ -42,6 +45,9 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     # Access requests
     _add_column(conn, "access_requests", "status", "status TEXT NOT NULL DEFAULT 'pending'")
     _add_column(conn, "access_requests", "created_at", "created_at INTEGER")
+
+    # Processing topics
+    _add_column(conn, "processing_topics", "chat_title", "chat_title TEXT")
 
     # Withdrawals
     _add_column(conn, "withdrawal_requests", "updated_at", "updated_at INTEGER")

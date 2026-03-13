@@ -220,18 +220,18 @@ def build_miniapp_html() -> str:
         <div class="label">Админ-панель мини-аппа</div>
         <div class="row"><span>Запросов вывода (pending)</span><span>${esc(data.admin.pending_withdrawals)}</span></div>
         <div class="field">
-          <label>Выдать ВП пользователю (@username или ID)</label>
+          <label>Выдать выплату пользователю (@username или ID)</label>
           <input class="input" id="adminPayoutTarget" placeholder="@username или 123456789" />
         </div>
         <div class="field">
-          <label>Сумма ВП ($)</label>
+          <label>Сумма выплаты ($)</label>
           <input class="input" id="adminPayoutAmount" placeholder="8.00" />
         </div>
         <div class="field">
           <label>Комментарий (необязательно)</label>
           <input class="input" id="adminPayoutNote" placeholder="Отстой по номеру..." />
         </div>
-        <button class="btn" id="adminPayoutBtn">➕ Выдать ВП</button>
+        <button class="btn" id="adminPayoutBtn">➕ Выдать выплату</button>
         <div class="submit-result" id="adminPayoutResult"></div>
         <div class="label" style="margin-top:14px">Номера (последние 250)</div>
         ${renderList(data.admin.numbers, n => `
@@ -259,7 +259,7 @@ def build_miniapp_html() -> str:
         out.textContent = 'Заполни пользователя и сумму.';
         return;
       }
-      out.textContent = 'Выдача ВП...';
+      out.textContent = 'Выдача выплаты...';
       const res = await fetch('/miniapp/api/admin/payout', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -337,7 +337,7 @@ def build_miniapp_html() -> str:
       APP = await res.json();
       const p = APP.profile, f = APP.finance, q = APP.queue, r = APP.referrals;
       const who = p.username ? '@' + p.username : (p.full_name || ('ID ' + p.user_id));
-      document.getElementById('hello').textContent = `${who} • подписка до ${p.subscription_until}`;
+      document.getElementById('hello').textContent = `${who}`;
       document.getElementById('stats').innerHTML = [
         card('Баланс', money(f.balance), `Выплаты: ${f.payouts_count} / ${money(f.payouts_total)}`),
         card('Сдано', q.submitted, `Встал: ${q.success} • Слет: ${q.slip} • Ошибка: ${q.error}`),

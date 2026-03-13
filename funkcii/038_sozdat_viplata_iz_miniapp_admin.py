@@ -18,7 +18,7 @@ def create_payout_from_miniapp_admin(tg_admin: Dict, target_raw: str, amount_val
             (target_user_id, amount, (note or "").strip(), now_ts()),
         )
         conn.commit()
-        notify_user_direct(int(target_user_id), f"💸 Вам начислили ВП: ${amount:.2f}")
+        notify_user_direct(int(target_user_id), f"💸 Вам начислена выплата: ${amount:.2f}")
         log_admin_action(
             admin_id,
             tg_admin.get("username"),

@@ -10,13 +10,6 @@ async def menu_show_profile(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
         "FROM queue_numbers WHERE user_id = ?",
         (user_id,),
     ).fetchone()
-    sub_until = conn.execute(
-        "SELECT subscription_until FROM users WHERE user_id = ?",
-        (user_id,),
-    ).fetchone()
-    sub_text = "-"
-    if sub_until and sub_until["subscription_until"]:
-        sub_text = format_ts(sub_until["subscription_until"])
     ref_code = ensure_ref_code(conn, user_id)
     referral_enabled = get_config_bool(conn, "referral_enabled", True)
     invited = conn.execute(
@@ -24,21 +17,24 @@ async def menu_show_profile(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
         (user_id,),
     ).fetchone()["cnt"]
     conn.close()
-    ref_line = "Реф. ссылка: выключена в настройках"
+
+    ref_line = "🔗 Рефералка выключена в настройках"
     if referral_enabled:
         bot_username = await get_bot_username(context)
         if bot_username:
-            ref_line = f"Реф. ссылка: https://t.me/{bot_username}?start={ref_code}"
+            ref_line = f"🔗 Реф. ссылка: https://t.me/{bot_username}?start={ref_code}"
         else:
-            ref_line = f"Реф. ссылка: ref-код {ref_code}"
+            ref_line = f"🔗 Реф. код: {ref_code}"
+
     text_profile = (
-        "👤 Мой профиль\n"
-        f"Баланс: ${balance:.2f}\n"
-        f"Сдано: {stats['total']}\n"
-        f"Встал: {stats['success']} | Слет: {stats['slip']} | Ошибка: {stats['error']}\n"
-        f"Подписка до: {sub_text}\n"
+        "👤 Профиль\n"
+        f"ID: {user_id}\n"
+        f"💰 Баланс: ${balance:.2f}\n\n"
+        "📈 Активность\n"
+        f"Всего: {stats['total']}\n"
+        f"✅ Встал: {stats['success']} | ❌ Слёт: {stats['slip']} | ⚠️ Ошибка: {stats['error']}\n\n"
         f"{ref_line}\n"
-        f"Приглашено: {invited}"
+        f"👥 Приглашено: {invited}"
     )
     rows = [[InlineKeyboardButton("💵 Запросить вывод", callback_data="user:withdraw")]]
     if MINI_APP_BASE_URL:

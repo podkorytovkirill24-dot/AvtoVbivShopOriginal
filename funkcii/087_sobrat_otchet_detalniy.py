@@ -5,7 +5,8 @@ def build_report_detailed(conn: sqlite3.Connection) -> str:
         "FROM queue_numbers q "
         "LEFT JOIN users u ON u.user_id = q.user_id "
         "LEFT JOIN tariffs t ON q.tariff_id = t.id "
-        "ORDER BY q.created_at DESC LIMIT 30"
+        "WHERE q.completed_at IS NOT NULL AND q.status IN ('success','slip','error','canceled') "
+        "ORDER BY q.completed_at DESC LIMIT 30"
     ).fetchall()
     lines = ["📈 Детальный отчёт", "Период: последние 30 записей", ""]
     for r in rows:
