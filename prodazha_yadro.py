@@ -986,7 +986,12 @@ class InstanceSupervisor:
         if self.is_running(user_id):
             return
 
-        token = self.cipher.decrypt(row["token_encrypted"])
+        try:
+            token = self.cipher.decrypt(row["token_encrypted"])
+        except Exception as exc:
+            self._invalidate_token(row, str(exc))
+            self._stop_process(user_id)
+            return
         instance_dir = Path(row["instance_dir"])
         instance_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1067,6 +1072,25 @@ class InstanceSupervisor:
                 stderr_handle=stderr_handle,
             )
         record_license_started(self.cfg, user_id)
+
+    def _invalidate_token(self, row: sqlite3.Row, reason: str = "") -> None:
+        user_id = int(row["user_id"])
+        try:
+            status = "expired" if is_license_expired(row) else "pending_token"
+            conn = get_conn(self.cfg)
+            conn.execute(
+                "UPDATE licenses SET token_encrypted = NULL, bot_id = NULL, bot_username = NULL, status = ?, updated_at = ? "
+                "WHERE user_id = ?",
+                (status, now_ts(), user_id),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+        try:
+            print(f"[sales] token decrypt failed for user_id={user_id}: {reason}")
+        except Exception:
+            pass
 
     def _cleanup_user(self, user_id: int) -> None:
         with self._lock:
