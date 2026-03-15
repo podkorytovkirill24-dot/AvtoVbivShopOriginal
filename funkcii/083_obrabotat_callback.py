@@ -246,7 +246,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         queue_id = int(parts[2])
         conn = get_conn()
         row = conn.execute(
-            "SELECT user_id, phone, worker_chat_id, worker_thread_id FROM queue_numbers WHERE id = ?",
+            "SELECT user_id, phone, worker_chat_id, worker_thread_id, worker_msg_id FROM queue_numbers WHERE id = ?",
             (queue_id,),
         ).fetchone()
         conn.close()
@@ -267,6 +267,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 chat_id=row["worker_chat_id"],
                 message_thread_id=row["worker_thread_id"] or None,
                 text=notify_text,
+                reply_to_message_id=row["worker_msg_id"] or None,
             )
         except Exception:
             pass
