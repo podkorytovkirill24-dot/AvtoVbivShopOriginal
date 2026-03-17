@@ -1,4 +1,4 @@
-﻿async def menu_show_archive(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, message=None) -> None:
+async def menu_show_archive(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, message=None) -> None:
     conn = get_conn()
     rows = conn.execute(
         "SELECT q.phone, q.status, q.created_at, q.assigned_at, q.completed_at, "
