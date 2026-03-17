@@ -28,7 +28,9 @@ async def handle_private_state(update: Update, context: ContextTypes.DEFAULT_TYP
             clear_state(context)
             return
         if limit_per_day > 0:
-            start_day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+            tz = get_kz_tz() if "get_kz_tz" in globals() else None
+            now = datetime.now(tz) if tz else datetime.now()
+            start_day = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
             cnt = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM queue_numbers "
                 "WHERE user_id = ? AND created_at >= ?",
@@ -597,6 +599,9 @@ async def handle_private_state(update: Update, context: ContextTypes.DEFAULT_TYP
             conn.close()
             await update.message.reply_text("Неверный формат. Пример: 04.02.2026")
             return
+        tz = get_kz_tz() if "get_kz_tz" in globals() else None
+        if tz:
+            dt = dt.replace(tzinfo=tz)
         start_ts = int(dt.timestamp())
         end_ts = int((dt + timedelta(days=1)).timestamp())
         rows = conn.execute(

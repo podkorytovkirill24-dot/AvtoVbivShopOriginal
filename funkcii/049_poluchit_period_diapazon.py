@@ -1,10 +1,11 @@
 def get_period_range(period_key: str) -> Tuple[int, int]:
-    now = datetime.now()
+    tz = get_kz_tz() if "get_kz_tz" in globals() else None
+    now = datetime.now(tz) if tz else datetime.now()
     if period_key == "today":
-        start = datetime(now.year, now.month, now.day)
+        start = datetime(now.year, now.month, now.day, tzinfo=tz) if tz else datetime(now.year, now.month, now.day)
         end = start + timedelta(days=1)
     elif period_key == "yesterday":
-        end = datetime(now.year, now.month, now.day)
+        end = datetime(now.year, now.month, now.day, tzinfo=tz) if tz else datetime(now.year, now.month, now.day)
         start = end - timedelta(days=1)
     elif period_key == "7d":
         end = now

@@ -49,7 +49,9 @@ def submit_numbers_from_miniapp(
             return {"ok": False, "error": "⛔ STOP-WORK. Приемка временно на паузе."}
 
         if limit_per_day > 0:
-            start_day = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+            tz = get_kz_tz() if "get_kz_tz" in globals() else None
+            now = datetime.now(tz) if tz else datetime.now()
+            start_day = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
             cnt = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM queue_numbers WHERE user_id = ? AND created_at >= ?",
                 (user_id, start_day),
